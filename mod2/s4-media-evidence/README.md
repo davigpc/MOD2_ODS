@@ -14,31 +14,34 @@ O projeto adota os princípios de **Clean Architecture**, **Domain-Driven Design
 mod2/s4-media-evidence/
 ├── CMakeLists.txt              # Configuração de build C++20 e dependências
 ├── README.md                   # Documentação do componente
+├── third_party/httplib/        # cpp-httplib vendido (HTTP server)
 ├── include/s4/                 # Headers públicos da biblioteca
 │   ├── domain/                 # 1. Coração do negócio (zero dependências externas)
 │   │   ├── entities/           # Entidades (MediaClip)
 │   │   ├── value_objects/      # Objetos de Valor (TimeWindow, ClipDescriptor)
-│   │   ├── repositories/       # Contratos de persistência (IMediaClipRepository)
+│   │   ├── repositories/       # Contratos (IMediaClipRepository, IFileStorage)
+│   │   ├── services/           # Porta de leitura do buffer (IMediaBufferReader)
 │   │   ├── strategies/         # Padrão GoF Strategy de retenção (IRetentionStrategy)
 │   │   └── errors/             # Hierarquia de exceções de domínio
 │   ├── application/            # 2. Orquestração de casos de uso e DTOs
-│   │   ├── use_cases/          # Casos de uso (ExtractClipUseCase, PurgeMediaUseCase)
-│   │   └── dtos/               # Data Transfer Objects (ClipDescriptorDTO)
+│   │   ├── use_cases/          # Casos de uso (ExtractClipUseCase, PurgeMediaUseCase futuro)
+│   │   └── dtos/               # Data Transfer Objects (ClipDescriptorDTO, ISO 8601)
 │   ├── infrastructure/         # 3. Adaptadores e integrações externas
 │   │   ├── database/           # Implementações de repositório (SQLite, In-Memory)
-│   │   ├── gstreamer/          # Fachada do buffer de RAM (IRAMBufferFacade)
-│   │   └── b3_bus/             # Consumidor de eventos do Barramento B3
+│   │   ├── filesystem/         # Persistência em disco (FileStorage)
+│   │   ├── hashing/            # Integridade criptográfica SHA-256 (OpenSSL)
+│   │   ├── gstreamer/          # Fachada do buffer (IRAMBufferFacade + MockRAMBufferFacade)
+│   │   └── b3_bus/             # Consumidor de eventos do Barramento B3 (contrato)
 │   └── presentation/           # 4. Controladores e exposição de API
-│       └── http/               # Controllers REST/gRPC (ClipDescriptorController)
+│       └── http/               # Controller + servidor REST (ClipDescriptorHttpServer)
 ├── src/                        # Implementações (.cpp)
-│   ├── application/
-│   │   └── use_cases/
-│   ├── presentation/
-│   │   └── http/
-│   └── infrastructure/
+│   ├── application/use_cases/  # extract_clip.cpp
+│   ├── presentation/http/      # controller + servidor REST
+│   └── infrastructure/         # hashing, database, filesystem, gstreamer
+├── main.cpp → src/main.cpp     # Daemon demo executável
 └── tests/                      # Suíte de testes automatizados
-    ├── unit/                   # Testes puros de domínio e aplicação (zero I/O)
-    └── integration/            # Testes com filesystem e SQLite
+    ├── unit/                   # Testes puros (domínio, casamento de uso, hash)
+    └── integration/            # Testes com SQLite, filesystem real e HTTP
 ```
 
 ---
@@ -49,10 +52,10 @@ Conforme definido em [`docs/responsability.md`](../../docs/responsability.md):
 
 | Submódulo | Funcionalidade | Padrão / Arquitetura | Responsável |
 | :--- | :--- | :--- | :--- |
-| **S4.1 — Ring Buffer Contínuo** | Gravação circular em RAM (`/dev/shm`) dos últimos $N$ segundos pré-evento. | Facade + POSIX Shared Memory / GStreamer | Henrique Azevedo |
-| **S4.2 — Binding Evento-Mídia** | Extração de trecho pré/pós evento da RAM, exportação em `.mp4` e hash SHA-256. | Command Handler + NVENC / Pipeline GStreamer | Davi Gomes |
-| **S4.3 — Retenção & Expurgo LGPD** | Expurgo automático após 7 dias (LGPD) ou emergencial a 85% do NVMe (`is_locked_for_audit`). | Daemon Worker + Strategy Pattern (`RetentionStrategy`) | Henrique Azevedo |
-| **S4.4 — API Descritores de Clipe** | Exposição de metadados e URIs locais sem trafegar vídeo binário pelo barramento. | REST / gRPC Controller | Davi Gomes |
+| **S4.1 — Ring Buffer Contínuo** | Gravação circular em RAM (`/dev/shm`) dos últimos $N$ segundos pré-evento. **Mockado**: `MockRAMBufferFacade` (frames sintéticos) até integração real. | Facade + POSIX Shared Memory / GStreamer | Henrique Azevedo |
+| **S4.2 — Binding Evento-Mídia** | Extração de trecho pré/pós evento da RAM, exportação em arquivo e hash SHA-256 real (OpenSSL). **Implementado** | Command Handler + SHA-256 | Davi Gomes |
+| **S4.3 — Retenção & Expurgo LGPD** | Expurgo automático após 7 dias (LGPD) ou emergencial a 85% do NVMe (`is_locked_for_audit`). **Diferido** (somente contrato `IRetentionStrategy`). | Daemon Worker + Strategy Pattern | Henrique Azevedo |
+| **S4.4 — API Descritores de Clipe** | Exposição de metadados e URIs locais sem trafegar vídeo binário. **Implementado**: REST `GET /api/v1/clips/{id}` | REST Controller + Clean Architecture | Davi Gomes |
 
 ---
 
@@ -86,15 +89,30 @@ cmake ..
 cmake --build .
 ```
 
-### Executando Testes de Unidade
+### Executando Testes
 
-Os testes de unidade seguem a convenção `deve_[resultado]_quando_[condicao]` com zero dependências de I/O externo:
+Os testes de unidade seguem a convenção `deve_[resultado]_quando_[condicao]`. Testes de unidade usam zero I/O
+(exceto o cálculo de hash); a integração cobre SQLite em arquivo temporário, extração com filesystem real e servidor HTTP.
 
 ```bash
 ctest --output-on-failure
-# ou executar diretamente:
-./test_s4_unit
 ```
+
+### Executando o Serviço (daemon demo)
+
+```bash
+./s4_media_evidence --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
+```
+
+O daemon inicia a captura sintética (mock), extrai um clipe de exemplo e expõe a API:
+
+```bash
+curl http://localhost:8080/api/v1/clips/<clip_id>
+sha256sum /tmp/s4-media/event-demo.mp4   # deve bater com "sha256_hash" do JSON
+```
+
+O plano de implementação e o backlog de integração real (S4.1/S4.3) estão em
+[`docs/PLANO_IMPLEMENTACAO_S4.md`](../../docs/PLANO_IMPLEMENTACAO_S4.md).
 
 ---
 
@@ -106,3 +124,5 @@ Antes de submeter código ou PR:
 - [x] **Nomenclatura Limpa**: Código autoexplicativo e funções focadas (SRP).
 - [x] **Tratamento de Exceções**: Uso de exceções tipadas de `DomainError` e `ApplicationError`.
 - [x] **Conformidade LGPD**: Entidade `MediaClip` possui controle de tempo de retenção e flag de trava de auditoria (`is_locked_for_audit`).
+- [x] **Testes de Unidade**: Suíte `deve_..._quando_...` passando (unit + integration).
+- [ ] **S4.3 — Expurgo LGPD**: pendente (contrato `IRetentionStrategy`; implementação real no backlog da Henrique).

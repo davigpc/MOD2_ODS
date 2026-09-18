@@ -1,0 +1,19 @@
+# Build artifacts
+build/
+out/
+
+# IDE
+.vscode/
+.idea/
+
+# C/C++ object and archive files
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Runtime data
+*.db
+*.db-journal

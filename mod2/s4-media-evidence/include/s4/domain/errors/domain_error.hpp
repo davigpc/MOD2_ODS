@@ -41,4 +41,28 @@ public:
         : ApplicationError(message) {}
 };
 
+class MediaBufferEmptyError : public ApplicationError {
+public:
+    explicit MediaBufferEmptyError(const std::string& message = "No media frames available in the requested time window")
+        : ApplicationError(message) {}
+};
+
+class HashingError : public ApplicationError {
+public:
+    explicit HashingError(const std::string& message = "Failed to compute cryptographic hash")
+        : ApplicationError(message) {}
+};
+
+class SqliteStorageError : public ApplicationError {
+public:
+    explicit SqliteStorageError(const std::string& message = "SQLite storage error")
+        : ApplicationError(message) {}
+};
+
+class FileOperationError : public ApplicationError {
+public:
+    explicit FileOperationError(const std::string& message = "File operation failed")
+        : ApplicationError(message) {}
+};
+
 } // namespace ods::s4::domain

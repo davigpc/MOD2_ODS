@@ -16,12 +16,21 @@ else()
 endif()
 
 # Include directories
-include_directories(include)
+include_directories(include third_party/httplib)
+
+# Third-party dependencies
+find_package(PkgConfig QUIET)
+find_package(SQLite3 REQUIRED)
+find_package(OpenSSL QUIET) # For SHA256
+find_package(Threads REQUIRED)
+
+find_library(UUID_LIBRARY NAMES uuid REQUIRED)
 
 # Core Library Sources
 file(GLOB_RECURSE S4_SOURCES CONFIGURE_DEPENDS
     "src/*.cpp"
 )
+list(REMOVE_ITEM S4_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
 
 add_library(s4_media_evidence_lib
     ${S4_SOURCES}
@@ -29,17 +38,15 @@ add_library(s4_media_evidence_lib
 
 target_include_directories(s4_media_evidence_lib PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib>
     $<INSTALL_INTERFACE:include>
 )
 
-# Third-party dependencies (Find or FetchContent can be configured as needed)
-find_package(PkgConfig QUIET)
-find_package(SQLite3 QUIET)
-find_package(OpenSSL QUIET) # For SHA256
-
-if(SQLite3_FOUND)
-    target_link_libraries(s4_media_evidence_lib PRIVATE SQLite::SQLite3)
-endif()
+target_link_libraries(s4_media_evidence_lib PRIVATE
+    SQLite3::SQLite3
+    ${UUID_LIBRARY}
+    Threads::Threads
+)
 
 if(OpenSSL_FOUND)
     target_link_libraries(s4_media_evidence_lib PRIVATE OpenSSL::Crypto)
@@ -54,7 +61,15 @@ endif()
 # Testing
 enable_testing()
 
-add_executable(test_s4_unit tests/unit/test_domain_and_usecase.cpp)
-target_link_libraries(test_s4_unit PRIVATE s4_media_evidence_lib)
-add_test(NAME test_s4_unit COMMAND test_s4_unit)
+function(s4_add_test name source)
+    add_executable(${name} ${source})
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(${name} PRIVATE s4_media_evidence_lib)
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
 
+s4_add_test(test_s4_unit tests/unit/test_domain_and_usecase.cpp)
+s4_add_test(test_s4_sha256 tests/unit/test_sha256_hasher.cpp)
+s4_add_test(test_s4_sqlite_repository tests/integration/test_sqlite_repository.cpp)
+s4_add_test(test_s4_extract_clip tests/integration/test_extract_clip.cpp)
+s4_add_test(test_s4_http_server tests/integration/test_http_server.cpp)
