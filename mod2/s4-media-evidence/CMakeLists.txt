@@ -26,6 +26,14 @@ find_package(Threads REQUIRED)
 
 find_library(UUID_LIBRARY NAMES uuid REQUIRED)
 
+# O nome do alvo importado do SQLite difere entre versões do CMake
+# (SQLite::SQLite3 nas mais antigas, SQLite3::SQLite3 nas mais novas).
+if(TARGET SQLite3::SQLite3)
+    set(SQLITE_TARGET SQLite3::SQLite3)
+else()
+    set(SQLITE_TARGET SQLite::SQLite3)
+endif()
+
 # Core Library Sources
 file(GLOB_RECURSE S4_SOURCES CONFIGURE_DEPENDS
     "src/*.cpp"
@@ -43,7 +51,7 @@ target_include_directories(s4_media_evidence_lib PUBLIC
 )
 
 target_link_libraries(s4_media_evidence_lib PRIVATE
-    SQLite3::SQLite3
+    ${SQLITE_TARGET}
     ${UUID_LIBRARY}
     Threads::Threads
 )

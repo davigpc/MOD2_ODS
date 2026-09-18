@@ -14,6 +14,9 @@ O projeto adota os princípios de **Clean Architecture**, **Domain-Driven Design
 mod2/s4-media-evidence/
 ├── CMakeLists.txt              # Configuração de build C++20 e dependências
 ├── README.md                   # Documentação do componente
+├── Dockerfile                  # Imagem OCI multi-arch (builder + runtime)
+├── docker-compose.yml          # Orquestração local (porta 8080 + volume)
+├── .dockerignore               # Exclusões do contexto de build
 ├── third_party/httplib/        # cpp-httplib vendido (HTTP server)
 ├── include/s4/                 # Headers públicos da biblioteca
 │   ├── domain/                 # 1. Coração do negócio (zero dependências externas)
@@ -113,6 +116,30 @@ sha256sum /tmp/s4-media/event-demo.mp4   # deve bater com "sha256_hash" do JSON
 
 O plano de implementação e o backlog de integração real (S4.1/S4.3) estão em
 [`docs/PLANO_IMPLEMENTACAO_S4.md`](../../docs/PLANO_IMPLEMENTACAO_S4.md).
+
+---
+
+## 🐳 Containerização (Docker)
+
+Imagem OCI **multi-arch** (`debian:bookworm-slim`, multi-stage): o estágio `builder` compila em C++20 e executa o
+`ctest` completo (falha de teste quebra o build), e o estágio `runtime` final contém apenas as bibliotecas em tempo de
+execução e o binário, rodando como usuário não-root `s4` com `VOLUME /data`.
+
+```bash
+# Build (testes rodam dentro do builder)
+docker build -t ods/s4-media-evidence:0.1.0 ./mod2/s4-media-evidence
+
+# Executar (dados persistidos em volume nomeado)
+docker run -d --rm --name s4 -p 8080:8080 -v s4_data:/data ods/s4-media-evidence:0.1.0
+curl http://127.0.0.1:8080/healthz                # {"status": "ok"}
+
+# Ou via docker compose (healthcheck + porta + volume)
+docker compose -f mod2/s4-media-evidence/docker-compose.yml up -d --build
+```
+
+Detalhes, verificação (smoke test) e instruções para a **Jetson Orin Nano (arm64)** — build nativo na própria Jetson
+ou alternativa com `buildx`/`binfmt` — estão em
+[`docs/PLANO_CONTAINERIZACAO_S4.md`](../../docs/PLANO_CONTAINERIZACAO_S4.md).
 
 ---
 

@@ -1,0 +1,15 @@
+# Build artifacts and version control noise
+build/
+out/
+CMakeCache.txt
+
+.git/
+.vscode/
+.idea/
+
+# Runtime/DB artifacts
+*.db
+*.db-journal
+
+# Docs (não são necessários na imagem)
+docs/

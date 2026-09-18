@@ -95,6 +95,11 @@ ClipDescriptorHttpServer::ClipDescriptorHttpServer(std::shared_ptr<domain::IMedi
     m_impl->repository = std::move(repository);
     m_impl->controller = std::make_shared<ClipDescriptorController>(m_impl->repository);
 
+    m_impl->server.Get("/healthz", [](const httplib::Request&, httplib::Response& response) {
+        response.status = 200;
+        response.set_content(R"({"status": "ok"})", "application/json");
+    });
+
     m_impl->server.Get(R"(/api/v1/clips/[A-Za-z0-9_-]+)",
         [this](const httplib::Request& request, httplib::Response& response) {
             try {
