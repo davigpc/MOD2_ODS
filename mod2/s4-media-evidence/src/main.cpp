@@ -1,7 +1,8 @@
 #include "s4/application/use_cases/extract_clip.hpp"
 #include "s4/infrastructure/database/sqlite_media_clip_repository.hpp"
 #include "s4/infrastructure/filesystem/file_storage.hpp"
-#include "s4/infrastructure/gstreamer/mock_ram_buffer_facade.hpp"
+#include "s4/infrastructure/gstreamer/ring_buffer_ram_facade.hpp"
+#include "s4/infrastructure/ringbuffer/synthetic_frame_source.hpp"
 #include "s4/presentation/http/clip_descriptor_http_server.hpp"
 
 #include <chrono>
@@ -61,15 +62,45 @@ int main(int argc, char* argv[]) {
     }
 
     auto repository = std::make_shared<ods::s4::infrastructure::SQLiteMediaClipRepository>(dbPath);
-    auto mediaBuffer = std::make_shared<ods::s4::infrastructure::MockRAMBufferFacade>(
-        std::chrono::seconds(30), 15, 320, 240
-    );
+
+    // S4.1 — ring buffer real em /dev/shm. A fonte sintetica mantem o demo
+    // rodando sem camera; na Jetson, troque por GStreamerAppsinkFrameSource
+    // com jetsonCsiH264Pipeline(). Nada mais nesta funcao muda: o
+    // ExtractClipUseCase so conhece a porta IMediaBufferReader.
+    ods::s4::application::RingBufferConfig bufferConfig;
+    bufferConfig.cameraId = "cam0";
+    bufferConfig.windowSeconds = 30.0;
+    bufferConfig.bitrateBps = 134400;
+    bufferConfig.width = 320;
+    bufferConfig.height = 240;
+    // Daemon: apos uma queda, o /dev/shm da execucao anterior pode ter ficado
+    // para tras e impediria a subida. Uma instancia por camera, entao limpar e
+    // o comportamento correto aqui.
+    bufferConfig.replaceStaleSegment = true;
+
+    ods::s4::infrastructure::SyntheticSourceOptions sourceOptions;
+    sourceOptions.fps = 15.0;
+    sourceOptions.gop = 15;
+    sourceOptions.keyframeBytes = 6000;
+    sourceOptions.deltaBytes = 1200;
+    sourceOptions.sessionId = "exec-demo-1";
+
+    std::shared_ptr<ods::s4::infrastructure::RingBufferRAMFacade> mediaBuffer;
+    try {
+        mediaBuffer = std::make_shared<ods::s4::infrastructure::RingBufferRAMFacade>(
+            bufferConfig,
+            std::make_unique<ods::s4::infrastructure::SyntheticFrameSource>(sourceOptions)
+        );
+    } catch (const ods::s4::domain::ODSBaseException& error) {
+        std::cerr << "cannot start the S4.1 ring buffer: " << error.what() << std::endl;
+        return 1;
+    }
     auto fileStorage = std::make_shared<ods::s4::infrastructure::FileStorage>();
     auto extractClip = std::make_shared<ods::s4::application::ExtractClipUseCase>(
         repository, mediaBuffer, fileStorage
     );
 
-    mediaBuffer->startCapture("mock-synthetic-source");
+    mediaBuffer->startCapture("synthetic-source");
 
     ods::s4::presentation::ClipDescriptorHttpServer server(repository);
     if (!server.bind(port)) {

@@ -20,10 +20,11 @@ mod2/s4-media-evidence/
 ├── third_party/httplib/        # cpp-httplib vendido (HTTP server)
 ├── include/s4/                 # Headers públicos da biblioteca
 │   ├── domain/                 # 1. Coração do negócio (zero dependências externas)
-│   │   ├── entities/           # Entidades (MediaClip)
-│   │   ├── value_objects/      # Objetos de Valor (TimeWindow, ClipDescriptor)
-│   │   ├── repositories/       # Contratos (IMediaClipRepository, IFileStorage)
-│   │   ├── services/           # Porta de leitura do buffer (IMediaBufferReader)
+│   │   ├── entities/           # Entidades (MediaClip, RingBuffer)
+│   │   ├── value_objects/      # Objetos de Valor (TimeWindow, ClipDescriptor,
+│   │   │                       #   CaptureWindow, FrameDescriptor, BufferCapacity)
+│   │   ├── repositories/       # Contratos (IMediaClipRepository, IFileStorage, IFrameStore)
+│   │   ├── services/           # Portas do buffer (IMediaBufferReader, IFrameSource)
 │   │   ├── strategies/         # Padrão GoF Strategy de retenção (IRetentionStrategy)
 │   │   └── errors/             # Hierarquia de exceções de domínio
 │   ├── application/            # 2. Orquestração de casos de uso e DTOs
@@ -33,7 +34,10 @@ mod2/s4-media-evidence/
 │   │   ├── database/           # Implementações de repositório (SQLite, In-Memory)
 │   │   ├── filesystem/         # Persistência em disco (FileStorage)
 │   │   ├── hashing/            # Integridade criptográfica SHA-256 (OpenSSL)
-│   │   ├── gstreamer/          # Fachada do buffer (IRAMBufferFacade + MockRAMBufferFacade)
+│   │   ├── gstreamer/          # Fachada do buffer: contrato, mock, RingBufferRAMFacade
+│   │   │                       #   e a fonte de captura (appsink_frame_source)
+│   │   ├── ringbuffer/         # S4.1: arena /dev/shm, ponte de relógios,
+│   │   │                       #   fonte sintética e cenário gravado
 │   │   └── b3_bus/             # Consumidor de eventos do Barramento B3 (contrato)
 │   └── presentation/           # 4. Controladores e exposição de API
 │       └── http/               # Controller + servidor REST (ClipDescriptorHttpServer)
@@ -55,7 +59,7 @@ Conforme definido em [`docs/responsability.md`](../../docs/responsability.md):
 
 | Submódulo | Funcionalidade | Padrão / Arquitetura | Responsável |
 | :--- | :--- | :--- | :--- |
-| **S4.1 — Ring Buffer Contínuo** | Gravação circular em RAM (`/dev/shm`) dos últimos $N$ segundos pré-evento. **Mockado**: `MockRAMBufferFacade` (frames sintéticos) até integração real. | Facade + POSIX Shared Memory / GStreamer | Henrique Azevedo |
+| **S4.1 — Ring Buffer Contínuo** | Gravação circular em RAM (`/dev/shm`) dos últimos $N$ segundos pré-evento, com alinhamento a keyframe e espera do pós-evento. **Implementado**: `RingBufferRAMFacade` (substitui o `MockRAMBufferFacade`, que permanece como dublê de teste). Ver [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md). | Facade + POSIX Shared Memory / GStreamer | Henrique Azevedo |
 | **S4.2 — Binding Evento-Mídia** | Extração de trecho pré/pós evento da RAM, exportação em arquivo e hash SHA-256 real (OpenSSL). **Implementado** | Command Handler + SHA-256 | Davi Gomes |
 | **S4.3 — Retenção & Expurgo LGPD** | Expurgo automático após 7 dias (LGPD) ou emergencial a 85% do NVMe (`is_locked_for_audit`). **Diferido** (somente contrato `IRetentionStrategy`). | Daemon Worker + Strategy Pattern | Henrique Azevedo |
 | **S4.4 — API Descritores de Clipe** | Exposição de metadados e URIs locais sem trafegar vídeo binário. **Implementado**: REST `GET /api/v1/clips/{id}` | REST Controller + Clean Architecture | Davi Gomes |
@@ -66,7 +70,7 @@ Conforme definido em [`docs/responsability.md`](../../docs/responsability.md):
 
 1. **Repository**: [`IMediaClipRepository`](include/s4/domain/repositories/media_clip_repository.hpp) isola completamente as regras de domínio do SQLite.
 2. **Strategy**: [`IRetentionStrategy`](include/s4/domain/strategies/retention_strategy.hpp) permite alternar dinamicamente os algoritmos de expurgo (prazo LGPD vs. cota de disco FIFO).
-3. **Facade**: [`IRAMBufferFacade`](include/s4/infrastructure/gstreamer/ram_buffer_facade.hpp) oculta a complexidade de ponteiros e pipes do GStreamer.
+3. **Facade**: [`IRAMBufferFacade`](include/s4/infrastructure/gstreamer/ram_buffer_facade.hpp) oculta a complexidade de ponteiros e pipes do GStreamer — implementado por [`RingBufferRAMFacade`](include/s4/infrastructure/gstreamer/ring_buffer_ram_facade.hpp) (produção) e `MockRAMBufferFacade` (testes).
 4. **Observer / Consumer**: [`B3EventConsumer`](include/s4/infrastructure/b3_bus/b3_event_consumer.hpp) assina eventos do barramento B3 e dispara os casos de uso.
 
 ---
@@ -107,12 +111,17 @@ ctest --output-on-failure
 ./s4_media_evidence --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
 ```
 
-O daemon inicia a captura sintética (mock), extrai um clipe de exemplo e expõe a API:
+O daemon inicia o ring buffer real do S4.1 em `/dev/shm/ods_s4_ring_cam0` (alimentado por uma fonte sintética,
+já que a Jetson e a câmera não estão presentes em toda máquina de desenvolvimento), extrai um clipe de exemplo e expõe a API:
 
 ```bash
 curl http://localhost:8080/api/v1/clips/<clip_id>
 sha256sum /tmp/s4-media/event-demo.mp4   # deve bater com "sha256_hash" do JSON
+ls -lh /dev/shm/ods_s4_ring_cam0         # o buffer circular, enquanto o daemon roda
 ```
+
+> **Nota de build:** o modo `Release` define `NDEBUG` e remove todos os `assert()`. Os testes do S4.1 usam
+> `ODS_CHECK` ([`tests/ods_check.hpp`](tests/ods_check.hpp)), que vale em qualquer modo de build.
 
 O plano de implementação e o backlog de integração real (S4.1/S4.3) estão em
 [`docs/PLANO_IMPLEMENTACAO_S4.md`](../../docs/PLANO_IMPLEMENTACAO_S4.md).

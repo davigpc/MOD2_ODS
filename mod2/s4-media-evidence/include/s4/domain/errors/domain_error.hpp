@@ -29,6 +29,40 @@ public:
         : DomainError(message) {}
 };
 
+// --- S4.1 Ring Buffer: violacoes de regra do buffer circular ----------------
+
+class InvalidCapacityError : public DomainError {
+public:
+    explicit InvalidCapacityError(const std::string& message = "Ring buffer capacity must be positive")
+        : DomainError(message) {}
+};
+
+class FrameTooLargeError : public DomainError {
+public:
+    explicit FrameTooLargeError(const std::string& message = "Frame does not fit in the ring buffer arena")
+        : DomainError(message) {}
+};
+
+// B2: busca, laco e reinicio nunca fazem o relogio retroceder silenciosamente.
+class NonMonotonicTimestampError : public DomainError {
+public:
+    explicit NonMonotonicTimestampError(const std::string& message = "Capture timestamp went backwards within the same session")
+        : DomainError(message) {}
+};
+
+class WindowNotInBufferError : public DomainError {
+public:
+    explicit WindowNotInBufferError(const std::string& message = "Requested window is no longer (or not yet) in the ring buffer")
+        : DomainError(message) {}
+};
+
+// A janela existe no buffer, mas nao ha keyframe que permita decodifica-la.
+class NoDecodableStartError : public DomainError {
+public:
+    explicit NoDecodableStartError(const std::string& message = "No keyframe available to decode the requested window")
+        : DomainError(message) {}
+};
+
 class ApplicationError : public ODSBaseException {
 public:
     explicit ApplicationError(const std::string& message)
@@ -50,6 +84,24 @@ public:
 class HashingError : public ApplicationError {
 public:
     explicit HashingError(const std::string& message = "Failed to compute cryptographic hash")
+        : ApplicationError(message) {}
+};
+
+class BufferNotRunningError : public ApplicationError {
+public:
+    explicit BufferNotRunningError(const std::string& message = "Ring buffer capture has not been started")
+        : ApplicationError(message) {}
+};
+
+class FrameSourceError : public ApplicationError {
+public:
+    explicit FrameSourceError(const std::string& message = "Video frame source failed")
+        : ApplicationError(message) {}
+};
+
+class FrameStoreError : public ApplicationError {
+public:
+    explicit FrameStoreError(const std::string& message = "Shared memory arena failed")
         : ApplicationError(message) {}
 };
 
