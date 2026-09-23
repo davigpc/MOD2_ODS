@@ -62,7 +62,7 @@ Conforme definido em [`docs/responsability.md`](../../docs/responsability.md):
 | **S4.1 — Ring Buffer Contínuo** | Gravação circular em RAM (`/dev/shm`) dos últimos $N$ segundos pré-evento, com alinhamento a keyframe e espera do pós-evento. **Implementado**: `RingBufferRAMFacade` (substitui o `MockRAMBufferFacade`, que permanece como dublê de teste). Ver [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md). | Facade + POSIX Shared Memory / GStreamer | Henrique Azevedo |
 | **S4.2 — Binding Evento-Mídia** | Extração de trecho pré/pós evento da RAM, exportação em arquivo e hash SHA-256 real (OpenSSL). **Implementado** | Command Handler + SHA-256 | Davi Gomes |
 | **S4.3 — Retenção & Expurgo LGPD** | Expurgo automático após 7 dias (LGPD) ou emergencial a 85% do NVMe (`is_locked_for_audit`). **Diferido** (somente contrato `IRetentionStrategy`). | Daemon Worker + Strategy Pattern | Henrique Azevedo |
-| **S4.4 — API Descritores de Clipe** | Exposição de metadados e URIs locais sem trafegar vídeo binário. **Implementado**: REST `GET /api/v1/clips/{id}` | REST Controller + Clean Architecture | Davi Gomes |
+| **S4.4 — API Descritores de Clipe** | Exposição de metadados e URIs locais sem trafegar vídeo binário. **Implementado**: REST `GET /api/v1/clips/{id}` + `POST /api/v1/events` (simulação de novo evento em runtime) | REST Controller + Clean Architecture | Davi Gomes |
 
 ---
 
@@ -119,6 +119,25 @@ curl http://localhost:8080/api/v1/clips/<clip_id>
 sha256sum /tmp/s4-media/event-demo.mp4   # deve bater com "sha256_hash" do JSON
 ls -lh /dev/shm/ods_s4_ring_cam0         # o buffer circular, enquanto o daemon roda
 ```
+
+### Simulando uma nova entrada de evento
+
+Para injetar um evento em runtime (sem reiniciar o daemon), use `POST /api/v1/events`. Cada chamada extrai um novo
+clipe do buffer, persiste em `$media_dir/<event_id>.mp4` e responde `201` com o DTO do clipe:
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/events \
+  -H 'Content-Type: application/json' \
+  -d '{"event_id": "evt-2026-0001"}'
+
+# janela explícita em epoch milliseconds (opcional; default = últimos 1s)
+curl -X POST http://127.0.0.1:8080/api/v1/events \
+  -H 'Content-Type: application/json' \
+  -d '{"event_id": "evt-2026-0002", "start_ms": 1720000000000, "end_ms": 1720000001000}'
+```
+
+- `event_id` ausente → gerado automaticamente (`event-<uuid>`); deve conter apenas `[A-Za-z0-9_-]`.
+- Janela inválida (`start_ms >= end_ms`) → `400`; janela sem frames no buffer → `500`.
 
 > **Nota de build:** o modo `Release` define `NDEBUG` e remove todos os `assert()`. Os testes do S4.1 usam
 > `ODS_CHECK` ([`tests/ods_check.hpp`](tests/ods_check.hpp)), que vale em qualquer modo de build.

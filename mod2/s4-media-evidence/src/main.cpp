@@ -102,7 +102,7 @@ int main(int argc, char* argv[]) {
 
     mediaBuffer->startCapture("synthetic-source");
 
-    ods::s4::presentation::ClipDescriptorHttpServer server(repository);
+    ods::s4::presentation::ClipDescriptorHttpServer server(repository, extractClip, mediaDir);
     if (!server.bind(port)) {
         std::cerr << "cannot bind to port " << port << '\n';
         return 1;
@@ -118,6 +118,8 @@ int main(int argc, char* argv[]) {
 
     std::cout << "S4 Media Evidence listening on http://127.0.0.1:" << port
               << "/api/v1/clips/{id}\n";
+    std::cout << "Simulate an event: POST http://127.0.0.1:" << port
+              << "/api/v1/events\n";
     std::cout << "Recording synthetic feed; extracting demo clip...\n";
     std::cout.flush();
 
