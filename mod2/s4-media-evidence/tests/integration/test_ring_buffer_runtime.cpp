@@ -404,6 +404,51 @@ void test_deve_devolver_lista_vazia_quando_janela_pedida_nao_existir_no_buffer()
     facade->stopCapture();
 }
 
+// Depois de stopCapture() a arena /dev/shm ja foi desmapeada, mas o S4.2 (via
+// POST /api/v1/events) ainda pode chamar readWindow() durante o desligamento:
+// o contrato continua sendo lista vazia, nunca FrameStoreError.
+void test_deve_devolver_lista_vazia_quando_ler_janela_apos_parar_a_captura() {
+    auto source = std::make_unique<infrastructure::SyntheticFrameSource>(
+        synthetic_options(5 * kFps));
+    auto* raw = source.get();
+    auto facade = make_facade(config(30.0), std::move(source));
+    facade->startCapture("synthetic");
+    raw->waitUntilFinished();
+    const auto end = std::chrono::system_clock::now();
+    const auto start = end - std::chrono::seconds(10);
+    ODS_CHECK(!facade->readWindow(start, end).empty());
+
+    facade->stopCapture();
+
+    ODS_CHECK(facade->readWindow(start, end).empty());
+    ODS_CHECK(facade->extractWindow(start, end).empty());
+}
+
+// Leituras concorrentes com o desligamento nao podem tocar a arena depois do
+// munmap (isso seria acesso a memoria liberada, e nao uma excecao).
+void test_deve_parar_sem_falha_quando_leituras_concorrerem_com_o_desligamento() {
+    for (int round = 0; round < 20; ++round) {
+        auto source = std::make_unique<infrastructure::SyntheticFrameSource>(
+            synthetic_options(5 * kFps));
+        auto* raw = source.get();
+        auto facade = std::make_shared<infrastructure::RingBufferRAMFacade>(
+            config(30.0), std::move(source));
+        facade->startCapture("synthetic");
+        raw->waitUntilFinished();
+        const auto end = std::chrono::system_clock::now();
+        const auto start = end - std::chrono::seconds(10);
+
+        std::thread reader([facade, start, end] {
+            for (int read = 0; read < 200; ++read) {
+                (void)facade->readWindow(start, end);
+            }
+        });
+        facade->stopCapture();
+        reader.join();
+        ODS_CHECK(facade->readWindow(start, end).empty());
+    }
+}
+
 void test_deve_expor_pipelines_gstreamer_prontos_quando_consultados() {
     infrastructure::CsiCameraOptions camera;
     const std::string csi = infrastructure::GStreamerAppsinkFrameSource::jetsonCsiH264Pipeline(camera);
@@ -439,6 +484,8 @@ int main() {
 
     test_deve_extrair_clipe_pelo_use_case_quando_buffer_real_substituir_o_mock();
     test_deve_devolver_lista_vazia_quando_janela_pedida_nao_existir_no_buffer();
+    test_deve_devolver_lista_vazia_quando_ler_janela_apos_parar_a_captura();
+    test_deve_parar_sem_falha_quando_leituras_concorrerem_com_o_desligamento();
     test_deve_expor_pipelines_gstreamer_prontos_quando_consultados();
 
     std::cout << "test_s4_ring_buffer_runtime: all tests passed\n";

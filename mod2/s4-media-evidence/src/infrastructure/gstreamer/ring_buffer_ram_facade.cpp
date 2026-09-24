@@ -57,6 +57,9 @@ void RingBufferRAMFacade::stopCapture() {
     // nenhuma extracao fique pendurada ate o timeout.
     m_frameArrived.notify_all();
     m_source->stop();
+    // Fecha a arena sob o mesmo mutex das leituras: uma extracao em curso
+    // termina antes do munmap, e as seguintes ja veem m_isCapturing == false.
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_store->close();
 }
 
@@ -113,6 +116,9 @@ std::vector<VideoFrame> RingBufferRAMFacade::extractWindow(
         // Janela ausente ou sem keyframe: o contrato do S4.2 e "lista vazia",
         // e o ExtractClipUseCase converte isso em MediaBufferEmptyError.
         result.clear();
+    } catch (const domain::BufferNotRunningError&) {
+        // Captura parada (desligamento): mesma resposta, a arena ja foi fechada.
+        result.clear();
     }
     return result;
 }
@@ -128,6 +134,11 @@ std::vector<std::vector<std::uint8_t>> RingBufferRAMFacade::readWindow(
     try {
         const CaptureWindow window(m_clock.toCaptureTsNs(start), m_clock.toCaptureTsNs(end));
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_isCapturing.load()) {
+            // Arena ja fechada por stopCapture(): nada a ler, e o contrato do
+            // S4.2 e lista vazia (nunca FrameStoreError).
+            return payloads;
+        }
         const application::ExtractedSegment segment = m_extract->execute(window);
         payloads.reserve(segment.frames.size());
         for (const auto& frame : segment.frames) {
@@ -163,6 +174,10 @@ application::ExtractedSegment RingBufferRAMFacade::extractCaptureWindow(
     m_frameArrived.wait_for(lock, timeout, [this, &window] {
         return !m_isCapturing.load() || hasReached(window.endNs());
     });
+    // stopCapture() pode ter fechado a arena enquanto esperavamos o pos-evento.
+    if (!m_isCapturing.load()) {
+        throw domain::BufferNotRunningError("capture stopped while waiting for the post-event");
+    }
     return m_extract->execute(window);
 }
 

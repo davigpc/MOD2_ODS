@@ -66,6 +66,67 @@ Conforme definido em [`docs/responsability.md`](../../docs/responsability.md):
 
 ---
 
+## 🎞️ S4.1 — Ring Buffer Contínuo: entrada → processamento → saída
+
+Resumo do contrato do S4.1. O detalhamento completo (funcionamento interno, decisões de projeto, dimensionamento)
+está em [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md).
+
+### O que recebe
+
+| Entrada | De onde vem | Formato |
+| :--- | :--- | :--- |
+| **Quadros de vídeo** | Câmera (P4) via GStreamer `appsink`, replay gravado (P6) ou fonte sintética (demo/testes) | `CapturedFrame { captureTsNs, data, length, isKeyframe, sessionId }` — H.264 Annex-B, 1 quadro por chamada |
+| **Pedido de trecho** | S4.2 (`ExtractClipUseCase`), disparado pelo `POST /api/v1/events` ou pelo barramento B3 | `readWindow(start, end)` em relógio de parede, ou `extractAround(tsEvento, preSeg, posSeg, timeout)` em relógio de captura |
+| **Configuração** | Build da aplicação | `RingBufferConfig { cameraId, windowSeconds, bitrateBps, safetyFactor, width, height, replaceStaleSegment }` |
+
+### O que faz
+
+1. **Aloca uma arena fixa em RAM compartilhada** (`/dev/shm/ods_s4_ring_<cameraId>`), dimensionada por
+   `bitrate / 8 × windowSeconds × safetyFactor`. Exemplo: 1080p a 4 Mbps com 30 s ≈ 21 MB por câmera. Nada é escrito no NVMe.
+2. **Grava continuamente** cada quadro na posição do ponteiro de escrita. Quando a arena enche, o ponteiro volta ao início
+   e **os quadros mais antigos são expulsos**, então o buffer guarda sempre os últimos *N* segundos.
+3. **Mantém um índice** (`FrameDescriptor { sequence, captureTsNs, offset, length, isKeyframe, sessionId }`), ou seja,
+   os "ponteiros de frames" da especificação.
+4. **Protege a linha do tempo**: rejeita e conta quadros com relógio retrocedendo e reinicia o buffer quando o `sessionId`
+   muda (replay/reinício), para nunca misturar duas sessões num mesmo clipe.
+5. **Responde a pedidos de trecho**: devolve os quadros da janela **começando no keyframe anterior** (senão o trecho não
+   seria decodificável) e, se o pós-evento ainda não foi capturado, **espera por ele** até o timeout.
+
+### O que entrega
+
+| Saída | Para quem | Conteúdo |
+| :--- | :--- | :--- |
+| `std::vector<std::vector<uint8_t>>` (`readWindow`) | S4.2, via porta `IMediaBufferReader` | Payloads H.264 da janela, começando em keyframe. **Lista vazia** se a janela não está no buffer ou se a captura já foi parada (o S4.2 converte em `MediaBufferEmptyError` → HTTP 500). |
+| `std::vector<VideoFrame>` (`extractWindow`) | S4.2, via `IRAMBufferFacade` | Os mesmos quadros, com timestamp de parede e dimensões |
+| `ExtractedSegment` (`extractAround`) | Quem conhece o relógio de captura | Quadros + `sessionId` + flags `isTruncatedAtStart` / `isTruncatedAtEnd` |
+| `BufferStats` (`stats()`) | Observabilidade | Quadros guardados, segundos cobertos, bytes usados, total ingerido/expulso/rejeitado |
+| Segmento `/dev/shm/ods_s4_ring_<cameraId>` | Outros processos (leitura sem cópia) | Os bytes brutos da arena circular |
+
+### Integração com o S4.2 / S4.4 (fluxo de um evento)
+
+```text
+POST /api/v1/events {"event_id": "evt-1"}              (S4.4, Davi)
+  └─> ExtractClipUseCase.execute(evt-1, [agora-1s, agora])   (S4.2, Davi)
+        └─> RingBufferRAMFacade.readWindow(start, end)      (S4.1)  → quadros H.264 da RAM
+        └─> grava $media_dir/evt-1.mp4 + SHA-256 + SQLite
+  <── 201 {clip_id, file_uri, start_time, end_time, sha256_hash, ...}
+```
+
+O `main.cpp` liga as duas partes: o `RingBufferRAMFacade` é injetado no `ExtractClipUseCase` como `IMediaBufferReader`.
+O `MockRAMBufferFacade` continua no repositório apenas como dublê dos testes do S4.2.
+
+### Validação (24/09/2026, imagem Docker `debian:bookworm-slim`, Release)
+
+| Verificação | Resultado |
+| :--- | :--- |
+| `ctest` (8 suítes, incluindo `test_s4_ring_buffer` e `test_s4_ring_buffer_runtime`) | 8/8 passaram |
+| ThreadSanitizer nas suítes do S4.1 | nenhuma condição de corrida |
+| Daemon em container: `POST /api/v1/events` | `201` com DTO; SHA-256 do arquivo igual ao do JSON; `400` para `event_id`/janela inválidos; `500` para janela fora do buffer |
+| Buffer após mais de 30 s (arena já deu a volta) | extração continua funcionando; segmento `/dev/shm` com tamanho fixo (756 000 B no demo) |
+| `docker stop` com eventos chegando | encerramento limpo (exit 0), sem acesso à arena já desmapeada |
+
+---
+
 ## 📐 Padrões GoF Implementados
 
 1. **Repository**: [`IMediaClipRepository`](include/s4/domain/repositories/media_clip_repository.hpp) isola completamente as regras de domínio do SQLite.
