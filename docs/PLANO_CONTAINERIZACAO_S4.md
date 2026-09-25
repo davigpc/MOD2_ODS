@@ -53,6 +53,11 @@ docker run --rm -p 8080:8080 --name s4-test ods/s4-media-evidence:0.1.0 &
 curl -sf http://127.0.0.1:8080/healthz
 curl -s http://127.0.0.1:8080/api/v1/clips/<clip_id>     # 200 + JSON DTO
 curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/api/v1/clips/inexistente  # 404
+
+# Simular uma nova entrada de evento sem reiniciar o daemon
+curl -s -X POST http://127.0.0.1:8080/api/v1/events \
+  -H 'Content-Type: application/json' -d '{"event_id": "evt-smoke-1"}'   # 201 + DTO do clipe
+
 docker cp s4-test:/data/media/event-demo.mp4 /tmp/      # conferir hash real
 sha256sum /tmp/event-demo.mp4                            # == sha256_hash do JSON
 docker stop s4-test

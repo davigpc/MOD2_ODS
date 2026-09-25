@@ -60,6 +60,27 @@ if(OpenSSL_FOUND)
     target_link_libraries(s4_media_evidence_lib PRIVATE OpenSSL::Crypto)
 endif()
 
+# --- S4.1 Ring Buffer -------------------------------------------------------
+# shm_open/shm_unlink vivem em librt nas glibc antigas (JetPack incluso).
+if(UNIX AND NOT APPLE)
+    target_link_libraries(s4_media_evidence_lib PUBLIC rt)
+endif()
+
+# Captura ao vivo e opcional: sem GStreamer o componente compila e os testes
+# rodam com as fontes sintetica e gravada.
+option(ODS_S4_WITH_GSTREAMER "Compila o adaptador de captura GStreamer (S4.1)" ON)
+if(ODS_S4_WITH_GSTREAMER AND PkgConfig_FOUND)
+    pkg_check_modules(GST QUIET gstreamer-1.0 gstreamer-app-1.0)
+    if(GST_FOUND)
+        target_compile_definitions(s4_media_evidence_lib PUBLIC ODS_S4_WITH_GSTREAMER)
+        target_include_directories(s4_media_evidence_lib PUBLIC ${GST_INCLUDE_DIRS})
+        target_link_libraries(s4_media_evidence_lib PUBLIC ${GST_LIBRARIES})
+        message(STATUS "GStreamer encontrado: captura ao vivo do S4.1 habilitada")
+    else()
+        message(STATUS "GStreamer ausente: S4.1 usa apenas fontes sintetica e gravada")
+    endif()
+endif()
+
 # Main executable
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
     add_executable(s4_media_evidence src/main.cpp)
@@ -81,3 +102,6 @@ s4_add_test(test_s4_sha256 tests/unit/test_sha256_hasher.cpp)
 s4_add_test(test_s4_sqlite_repository tests/integration/test_sqlite_repository.cpp)
 s4_add_test(test_s4_extract_clip tests/integration/test_extract_clip.cpp)
 s4_add_test(test_s4_http_server tests/integration/test_http_server.cpp)
+s4_add_test(test_s4_http_post_event tests/integration/test_http_post_event.cpp)
+s4_add_test(test_s4_ring_buffer tests/unit/test_ring_buffer.cpp)
+s4_add_test(test_s4_ring_buffer_runtime tests/integration/test_ring_buffer_runtime.cpp)
