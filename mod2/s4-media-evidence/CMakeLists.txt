@@ -66,19 +66,64 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(s4_media_evidence_lib PUBLIC rt)
 endif()
 
-# Captura ao vivo e opcional: sem GStreamer o componente compila e os testes
-# rodam com as fontes sintetica e gravada.
+# Captura ao vivo e replay de video sao o coracao do S4.1/S4.4: sem GStreamer
+# nao existe caminho que produza um MP4 a partir de video real.
+#
+# O padrao e exigir o GStreamer. Antes o bloco abaixo degradava em silencio
+# (message(STATUS)) quando o .pc nao aparecia, e o efeito pratico foi uma imagem
+# Docker inteira construida, testada e publicada sem conseguir reproduzir um
+# unico quadro -- com o ctest reportando "all tests passed", porque o unico
+# teste de MP4 real esta sob #ifdef. Um aviso de uma linha num log de build
+# longo nao e protecao.
+#
+# Quem realmente quiser compilar sem GStreamer (build de outra plataforma, ou
+# desenvolvimento das partes que nao usam video) pede explicitamente com
+# -DODS_S4_WITH_GSTREAMER=OFF e recebe o aviso.
 option(ODS_S4_WITH_GSTREAMER "Compila o adaptador de captura GStreamer (S4.1)" ON)
-if(ODS_S4_WITH_GSTREAMER AND PkgConfig_FOUND)
-    pkg_check_modules(GST QUIET gstreamer-1.0 gstreamer-app-1.0)
+option(ODS_S4_REQUIRE_GSTREAMER "Falha a configuracao se o GStreamer nao for encontrado" ON)
+
+set(ODS_S4_GSTREAMER_ENABLED OFF)
+if(ODS_S4_WITH_GSTREAMER)
+    # PkgConfig::GST carrega includes, diretorios de biblioteca e flags de link.
+    # Usar apenas ${GST_LIBRARIES} (que sao so nomes) perde o -L e so funciona
+    # por acaso quando o GStreamer esta em /usr/lib64.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GST QUIET gstreamer-1.0 gstreamer-app-1.0 IMPORTED_TARGET)
     if(GST_FOUND)
-        target_compile_definitions(s4_media_evidence_lib PUBLIC ODS_S4_WITH_GSTREAMER)
-        target_include_directories(s4_media_evidence_lib PUBLIC ${GST_INCLUDE_DIRS})
-        target_link_libraries(s4_media_evidence_lib PUBLIC ${GST_LIBRARIES})
-        message(STATUS "GStreamer encontrado: captura ao vivo do S4.1 habilitada")
+        set(ODS_S4_GSTREAMER_ENABLED ON)
+        message(STATUS "GStreamer habilitado: captura e replay do S4.1")
     else()
-        message(STATUS "GStreamer ausente: S4.1 usa apenas fontes sintetica e gravada")
+        set(ODS_S4_GSTREAMER_MISSING_REASON
+            "gstreamer-1.0/gstreamer-app-1.0 nao encontrados por pkg-config")
     endif()
+endif()
+
+if(ODS_S4_WITH_GSTREAMER AND NOT ODS_S4_GSTREAMER_ENABLED)
+    # gstreamer-app-1.0.pc vem de libgstreamer-plugins-base1.0-dev, e nao de
+    # gstreamer1.0-dev: e um descuido facil de cometer e o sintoma e sempre o
+    # mesmo, "o build passa mas nao tem GStreamer".
+    set(ODS_S4_GSTREAMER_HINT
+        "Debian/Ubuntu: apt-get install gstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+         Fedora/RHEL:   dnf install gstreamer1-devel gstreamer1-plugins-base-devel gstreamer1-plugins-base
+         Se o .pc existe em outro prefixo, aponte PKG_CONFIG_PATH para ele.")
+    if(ODS_S4_REQUIRE_GSTREAMER)
+        message(FATAL_ERROR
+            "ODS_S4_WITH_GSTREAMER=ON mas ${ODS_S4_GSTREAMER_MISSING_REASON}.\n"
+            "O S4 precisa do GStreamer para reproduzir video e extrair MP4.\n"
+            "${ODS_S4_GSTREAMER_HINT}\n"
+            "Para compilar sem GStreamer de proposito: -DODS_S4_WITH_GSTREAMER=OFF")
+    else()
+        message(WARNING
+            "GStreamer ausente (${ODS_S4_GSTREAMER_MISSING_REASON}). "
+            "O S4 sera compilado SEM captura nem replay de video, e o cenario de "
+            "MP4 real nao sera executado -- os testes passarão sem exercitar essa "
+            "parte. ${ODS_S4_GSTREAMER_HINT}")
+    endif()
+endif()
+
+if(ODS_S4_GSTREAMER_ENABLED)
+    target_compile_definitions(s4_media_evidence_lib PUBLIC ODS_S4_WITH_GSTREAMER)
+    target_link_libraries(s4_media_evidence_lib PUBLIC PkgConfig::GST)
 endif()
 
 # Main executable
@@ -86,6 +131,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp")
     add_executable(s4_media_evidence src/main.cpp)
     target_link_libraries(s4_media_evidence PRIVATE s4_media_evidence_lib)
 endif()
+
+# Tools executables
+add_executable(s4_record_scenario tools/record_scenario.cpp)
+target_link_libraries(s4_record_scenario PRIVATE s4_media_evidence_lib)
 
 # Testing
 enable_testing()
@@ -95,6 +144,11 @@ function(s4_add_test name source)
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(${name} PRIVATE s4_media_evidence_lib)
     add_test(NAME ${name} COMMAND ${name})
+    # O CTest roda a partir do diretorio de build, mas os testes leem cenarios
+    # gravados e o video de teste por caminho relativo a raiz do projeto.
+    set_tests_properties(${name} PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
 endfunction()
 
 s4_add_test(test_s4_unit tests/unit/test_domain_and_usecase.cpp)
@@ -105,3 +159,5 @@ s4_add_test(test_s4_http_server tests/integration/test_http_server.cpp)
 s4_add_test(test_s4_http_post_event tests/integration/test_http_post_event.cpp)
 s4_add_test(test_s4_ring_buffer tests/unit/test_ring_buffer.cpp)
 s4_add_test(test_s4_ring_buffer_runtime tests/integration/test_ring_buffer_runtime.cpp)
+s4_add_test(test_s4_iso_bmff_timestamps tests/unit/test_iso_bmff_timestamps.cpp)
+s4_add_test(test_s4_replay_e2e tests/integration/test_replay_e2e.cpp)

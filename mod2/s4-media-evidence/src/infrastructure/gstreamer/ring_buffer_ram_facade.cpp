@@ -192,4 +192,24 @@ domain::BufferStats RingBufferRAMFacade::stats() const {
     return m_ringBuffer->stats();
 }
 
+domain::Nanoseconds RingBufferRAMFacade::newestCaptureTsNs() const {
+    const domain::BufferStats snapshot = stats();
+    // hasFrames e o unico campo que distingue "nenhum quadro" de "o primeiro
+    // quadro tem capture_ts 0" (que acontece se a ancora cair em zero).
+    return snapshot.hasFrames ? snapshot.newestCaptureTsNs : 0;
+}
+
+std::chrono::system_clock::time_point RingBufferRAMFacade::toWallClock(
+    domain::Nanoseconds captureTsNs
+) const {
+    if (!m_clock.isAnchored()) {
+        // Sem ancora nao existe traducao: devolver um 1970 silencioso produziria
+        // um descritor de clipe com data absurda em vez de um erro visivel.
+        throw domain::BufferNotRunningError(
+            "capture clock is not anchored yet; no frame has been ingested"
+        );
+    }
+    return m_clock.toWallClock(captureTsNs);
+}
+
 } // namespace ods::s4::infrastructure

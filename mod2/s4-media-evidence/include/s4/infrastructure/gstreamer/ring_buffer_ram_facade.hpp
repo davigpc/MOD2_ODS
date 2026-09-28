@@ -10,6 +10,7 @@
 
 #include "s4/application/dtos/extracted_segment.hpp"
 #include "s4/application/ring_buffer_config.hpp"
+#include "s4/application/services/capture_buffer_reader.hpp"
 #include "s4/application/use_cases/extract_capture_window.hpp"
 #include "s4/application/use_cases/ingest_frame.hpp"
 #include "s4/domain/entities/ring_buffer.hpp"
@@ -37,7 +38,10 @@ namespace ods::s4::infrastructure {
 //   * espera pelo pos-evento, que no instante do evento ainda nao foi capturado;
 //   * rejeicao de relogio retrocedendo e reinicio por troca de sessao (B2);
 //   * bytes em /dev/shm, legiveis por outro processo sem copia.
-class RingBufferRAMFacade : public IRAMBufferFacade, public domain::IMediaBufferReader {
+class RingBufferRAMFacade
+    : public IRAMBufferFacade
+    , public domain::IMediaBufferReader
+    , public application::ICaptureBufferReader {
 public:
     // A fachada e DONA da fonte, do indice e da arena: quando ela morre, o
     // segmento /dev/shm e liberado junto (RAII, sem coletor de lixo).
@@ -103,6 +107,29 @@ public:
     // --- inspecao -----------------------------------------------------------
 
     [[nodiscard]] domain::BufferStats stats() const;
+
+    // --- application::ICaptureBufferReader ---------------------------------
+
+    // Os tres metodos abaixo ja existiam na fachada por causa do S4.1; o que
+    // mudou foi expor a mesma capacidade por uma porta, para que o caso de uso
+    // de extracao dependa do CONTRATO e nao da classe concreta de
+    // infraestrutura.
+
+    // stats() e o nome historico (S4.1); bufferStats() e o nome da porta. Os
+    // dois coexistem para nao reescrever os testes antigos.
+    [[nodiscard]] domain::BufferStats bufferStats() const override { return stats(); }
+
+    // Instante de captura mais recente, ou 0 se nada foi capturado ainda.
+    // A API usa isso para tratar "agora" em relogio de captura: sem ele, um
+    // cliente so teria como chutar um capture_ts e o resultado seria um 500
+    // dificil de explicar.
+    [[nodiscard]] domain::Nanoseconds newestCaptureTsNs() const override;
+
+    // Traduz captura -> parede pelo mesmo ponto unico do componente.
+    [[nodiscard]] std::chrono::system_clock::time_point toWallClock(
+        domain::Nanoseconds captureTsNs
+    ) const override;
+
     [[nodiscard]] std::uint64_t framesRejectedTotal() const noexcept {
         return m_framesRejectedTotal.load();
     }

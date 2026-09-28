@@ -7,13 +7,37 @@ FROM debian:bookworm-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# gstreamer1.0-dev traz os headers do core; os plugins base (coreelements,
+# appsink/appsrc) vem de gstreamer1.0-plugins-base. O replay de .mp4 depende
+# de qtdemux e mp4mux (gstreamer1.0-plugins-good) E de h264parse
+# (gstreamer1.0-plugins-bad).
+#
+# A separacao entre "bad" e "good" e o que faz este Dockerfile parecer correto
+# e nao funcionar: h264parse mora em libgstvideoparsersbad.so, que fica no
+# conjunto "bad", e nao em "base" nem em "good". Sem o pacote -bad o configure
+# acha o GStreamer (headers e .pc estao la), o build passa, e so na hora de
+# montar o pipeline aparece: no element "h264parse".
+#
+# libgstreamer-plugins-base1.0-dev tambem nao e redundante com gstreamer1.0-dev:
+# e ele que instala o gstreamer-app-1.0.pc, o .pc de que o CMake usa para achar
+# gstappsrc/gstappsink. Sem esse pacote o configure passa, o build passa e o
+# ctest passa -- com o caminho de GStreamer silenciosamente desligado, porque o
+# unico teste de MP4 real e compilado sob #ifdef. Foi assim que uma imagem
+# inteira saiu daqui sem conseguir reproduzir um unico quadro.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         g++ \
         cmake \
         make \
+        pkg-config \
         libsqlite3-dev \
         libssl-dev \
         uuid-dev \
+        gstreamer1.0-dev \
+        libgstreamer-plugins-base1.0-dev \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad \
+        gstreamer1.0-tools \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -22,7 +46,12 @@ COPY CMakeLists.txt ./
 COPY include ./include
 COPY src ./src
 COPY tests ./tests
+COPY tools ./tools
 COPY third_party ./third_party
+# Cenarios gravados e video de teste: o ctest le os dois a partir da raiz do
+# projeto, entao precisam existir no contexto do builder.
+COPY scenarios ./scenarios
+COPY video_test ./video_test
 
 # Release build; falha de teste aqui impede a imagem final
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -34,12 +63,19 @@ FROM debian:bookworm-slim AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# O runtime precisa dos mesmos plugins que o builder. O h264parse (plugins
+# -bad) e obrigatorio porque e ele que converte o sample em access unit
+# alinhada, que e o formato que o ring buffer assume.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-0 \
         libssl3 \
         libuuid1 \
         libstdc++6 \
         curl \
+        gstreamer1.0 \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 s4 \
     && mkdir -p /data/media \
@@ -48,6 +84,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /src/build/s4_media_evidence /app/s4_media_evidence
+COPY --from=builder /src/video_test /app/video_test
+COPY --from=builder /src/scenarios /app/scenarios
 
 USER s4
 
@@ -59,3 +97,31 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 VOLUME ["/data"]
 
 CMD ["/app/s4_media_evidence", "--port", "8080", "--db", "/data/s4.db", "--media-dir", "/data/media"]
+
+# ---------- Estágio 3: smoke (validação, não vai para a imagem final) ----
+# Existe para provar que a imagem de runtime realmente faz o que o Dockerfile
+# promete: replay de MP4 real, extracao de container decodificavel e hash
+# repetivel.
+#
+# As ferramentas de teste (jq, gstreamer1.0-tools) ficam AQUI e nao no runtime.
+# Encher a imagem de produção com ferramentas de verificação seria trocar
+# superfície de ataque por conveniência de quem testa.
+#
+# Uso: docker build --target smoke -t s4-media-evidence:smoke .
+FROM runtime AS smoke
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        jq \
+        gstreamer1.0-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY scripts/smoke_e2e.sh /app/scripts/smoke_e2e.sh
+RUN chmod +x /app/scripts/smoke_e2e.sh
+
+USER s4
+
+# O script sobe dois daemons, sobe o replay, extrai um clipe, checa a API e
+# compara o hash entre as duas execucoes. Qualquer falha quebra o build.
+RUN /app/scripts/smoke_e2e.sh /app/s4_media_evidence

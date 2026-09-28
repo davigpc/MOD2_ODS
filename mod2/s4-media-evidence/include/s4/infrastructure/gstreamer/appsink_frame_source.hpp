@@ -54,8 +54,13 @@ public:
         return m_pipelineDescription;
     }
 
+    // Estado opaco do pimpl. So a declaracao aparece aqui, entao quem inclui
+    // este header continua sem ver gst/*.h. E publico de proposito: as funcoes
+    // de callback do GStreamer (new-sample) sao funcoes livres no .cpp e
+    // precisam alcancar este tipo.
+    struct Impl;
+
 private:
-    struct Impl;   // esconde gst/*.h de quem inclui este header (pimpl)
     Impl* m_impl;
     std::string m_pipelineDescription;
     std::string m_sessionId;
