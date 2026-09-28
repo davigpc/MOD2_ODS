@@ -5,7 +5,7 @@
 # O que este script comprova, em ordem:
 #   1. o daemon sobe com --source e --scenario;
 #   2. o ring buffer enche com quadros do video real;
-#   3. o cenario extrai um MP4 que decodifica de verdade;
+#   3. o cenario extrai um container MP4 bem formado e legivel;
 #   4. a API HTTP responde (buffer/stats, POST /events, GET /clips/{id});
 #   5. o sha256 publicado bate com o arquivo em disco;
 #   6. duas execucoes do mesmo video produzem o mesmo sha256.
@@ -128,20 +128,47 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "3. o MP4 do cenario e um container real e decodifica"
+step "3. o MP4 do cenario e um container real e bem formado"
 
-# So a assinatura ftyp nao prova decodificabilidade: um container truncado
-# tambem tem ftyp. O teste que vale e passar pelo demuxer e pelo parser de
-# video de verdade.
+# So a assinatura ftyp nao prova nada: um container truncado tambem tem ftyp.
+# O teste que vale e passar pelo demuxer e pelo parser de bitstream, que leem o
+# moov inteiro e reparseiam cada amostra.
+#
+# ATENCAO ao que esta checagem prova: h264parse faz PARSE do bitstream, nao
+# decodifica pixels. Ela descarta o erro classico de "Annex-B com nome de .mp4"
+# porque o container tem ftyp/moov/mdat e as tabelas de amostra sao coerentes.
+# Provar pixels exige um decoder, verificado a parte e so quando existe.
 if command -v gst-launch-1.0 >/dev/null 2>&1; then
     if timeout 60 gst-launch-1.0 -q \
         filesrc location="${CLIP_PATH}" ! qtdemux ! h264parse ! fakesink >/dev/null 2>&1; then
-        pass "qtdemux ! h264parse aceitou o container"
+        pass "qtdemux ! h264parse leu o container inteiro"
     else
         fail "o container nao passou por qtdemux ! h264parse"
     fi
+
+    # Decoder e opcional: maquina sem VA-API e sem avdec (comum em host de
+    # desenvolvimento) simplesmente nao tem como decodificar. Ausencia de
+    # decoder e falha do ambiente, nao do artefato -- por isso nao reprova.
+    DECODER=""
+    for candidate in vaapih264dec avdec_h264; do
+        if gst-inspect-1.0 "${candidate}" >/dev/null 2>&1; then
+            DECODER="${candidate}"
+            break
+        fi
+    done
+    if [[ -n "${DECODER}" ]]; then
+        if timeout 60 gst-launch-1.0 -q \
+            filesrc location="${CLIP_PATH}" ! qtdemux ! h264parse \
+            ! "${DECODER}" ! videoconvert ! fakesink >/dev/null 2>&1; then
+            pass "pixels decodificados por ${DECODER}"
+        else
+            fail "o clipe nao decodificou em ${DECODER}: container OK, video nao"
+        fi
+    else
+        echo "  pula  sem decoder H.264 neste host: pixels nao verificados"
+    fi
 else
-    echo "  pula  gst-launch-1.0 ausente: decodificacao nao verificada"
+    echo "  pula  gst-launch-1.0 ausente: container nao verificado"
 fi
 
 FIRST_BOX="$(head -c 8 "${CLIP_PATH}" | tail -c 4)"

@@ -6,6 +6,16 @@ O serviço **S4** é responsável por gerenciar o ciclo de vida das evidências 
 
 ---
 
+> ### ▶️ Demonstração rápida
+>
+> Para **mostrar o fluxo funcionando** para outra pessoa — do MP4 real até o
+> artefato indexado, com o que esperar em cada passo e por que cada resultado é
+> prova — veja o guia: **[`docs/S4.4-demo-replay-e2e.md`](docs/S4.4-demo-replay-e2e.md)**.
+>
+> Atalho: `./scripts/smoke_e2e.sh ./build/s4_media_evidence` sobe o daemon com
+> replay de vídeo real, extrai um clipe, confere a decodificabilidade do
+> container e exige que duas execuções produzam o mesmo SHA-256.
+
 ## 🏗️ Arquitetura e Estrutura de Diretórios
 
 O projeto adota os princípios de **Clean Architecture**, **Domain-Driven Design (DDD)** e **Design Patterns (GoF)**, desenvolvido em **C++20** com sistema de build **CMake**.
@@ -28,14 +38,17 @@ mod2/s4-media-evidence/
 │   │   ├── strategies/         # Padrão GoF Strategy de retenção (IRetentionStrategy)
 │   │   └── errors/             # Hierarquia de exceções de domínio
 │   ├── application/            # 2. Orquestração de casos de uso e DTOs
+│   │   ├── services/           # Portas do fluxo real (ICaptureBufferReader, IMediaMuxer)
 │   │   ├── use_cases/          # Casos de uso (ExtractClipUseCase, PurgeMediaUseCase futuro)
 │   │   └── dtos/               # Data Transfer Objects (ClipDescriptorDTO, ISO 8601)
 │   ├── infrastructure/         # 3. Adaptadores e integrações externas
 │   │   ├── database/           # Implementações de repositório (SQLite, In-Memory)
 │   │   ├── filesystem/         # Persistência em disco (FileStorage)
 │   │   ├── hashing/            # Integridade criptográfica SHA-256 (OpenSSL)
-│   │   ├── gstreamer/          # Fachada do buffer: contrato, mock, RingBufferRAMFacade
-│   │   │                       #   e a fonte de captura (appsink_frame_source)
+│   │   ├── gstreamer/          # Fachada do buffer: contrato, mock, RingBufferRAMFacade,
+│   │   │                       #   fonte de captura (appsink_frame_source) e
+│   │   │                       #   o muxer MP4 (GStreamerMp4Muxer)
+│   │   ├── media/              # ISO-BMFF: normalização dos timestamps do container
 │   │   ├── ringbuffer/         # S4.1: arena /dev/shm, ponte de relógios,
 │   │   │                       #   fonte sintética e cenário gravado
 │   │   └── b3_bus/             # Consumidor de eventos do Barramento B3 (contrato)
@@ -46,10 +59,19 @@ mod2/s4-media-evidence/
 │   ├── presentation/http/      # controller + servidor REST
 │   └── infrastructure/         # hashing, database, filesystem, gstreamer
 ├── main.cpp → src/main.cpp     # Daemon demo executável
+├── tools/                      # record_scenario: grava um cenário em .idx/.bin
+├── scripts/smoke_e2e.sh        # Verificação E2E de ponta a ponta
 └── tests/                      # Suíte de testes automatizados
-    ├── unit/                   # Testes puros (domínio, casamento de uso, hash)
-    └── integration/            # Testes com SQLite, filesystem real e HTTP
+    ├── unit/                   # Testes puros (domínio, casamento de uso, hash, ISO-BMFF)
+    └── integration/            # Testes com SQLite, filesystem real, HTTP e MP4 real
 ```
+
+### Documentação
+
+| Documento | Para quê |
+| :--- | :--- |
+| [`docs/S4.4-demo-replay-e2e.md`](docs/S4.4-demo-replay-e2e.md) | **Guia de demonstração**: mostrar o fluxo do MP4 real ao artefato indexado, passo a passo. |
+| [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md) | Detalhes do ring buffer: arena, evicção, ponte de relógios. |
 
 ---
 
@@ -104,22 +126,47 @@ está em [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md).
 
 ### Integração com o S4.2 / S4.4 (fluxo de um evento)
 
+Há dois caminhos de execução, e a diferença entre eles é a razão de existir o relógio de captura.
+
+**Caminho do S4.4 — janela em relógio de captura** (`executeCaptureWindow`):
+
 ```text
-POST /api/v1/events {"event_id": "evt-1"}              (S4.4, Davi)
-  └─> ExtractClipUseCase.execute(evt-1, [agora-1s, agora])   (S4.2, Davi)
-        └─> RingBufferRAMFacade.readWindow(start, end)      (S4.1)  → quadros H.264 da RAM
-        └─> grava $media_dir/evt-1.mp4 + SHA-256 + SQLite
+POST /api/v1/events {"event_id":"evt-1","capture_ts_ns":T,
+                     "pre_window_seconds":1.0,"post_window_seconds":0.5}
+  └─> ExtractClipUseCase.executeCaptureWindow(...)            (S4.2)
+        └─> RingBufferRAMFacade.extractCaptureWindow([T-1s, T+0.5s])   (S4.1)
+        │     espera o pós-evento chegar, realinhando no keyframe mais próximo
+        └─> GStreamerMp4Muxer.mux(...)                        (S4.4)
+        │     appsrc → h264parse → mp4mux (faststart) → appsink
+        │     normaliza os timestamps de cabeçalho do container
+        └─> grava $media_dir/evt-1.mp4 + SHA-256 do arquivo final + SQLite
   <── 201 {clip_id, file_uri, start_time, end_time, sha256_hash, ...}
 ```
 
-O `main.cpp` liga as duas partes: o `RingBufferRAMFacade` é injetado no `ExtractClipUseCase` como `IMediaBufferReader`.
-O `MockRAMBufferFacade` continua no repositório apenas como dublê dos testes do S4.2.
+**Caminho legado — janela em relógio de parede** (`execute` com `start_ms`/`end_ms`): mantido para
+compatibilidade, sem muxing de container e sem a espera do pós-evento.
 
-### Validação (24/09/2026, imagem Docker `debian:bookworm-slim`, Release)
+As duas portas que sustentam o caminho novo são
+[`ICaptureBufferReader`](include/s4/application/services/capture_buffer_reader.hpp) e
+[`IMediaMuxer`](include/s4/application/services/media_muxer.hpp), injetadas no caso de uso. O `main.cpp` faz
+essa ligação; o `MockRAMBufferFacade` continua no repositório apenas como dublê dos testes do S4.2.
+
+**Sobre o relógio de captura:** o vídeo de teste tem B-frames, então o PTS não é monotônico na ordem de chegada e
+descartar quadros no ring buffer. O carimbo usado é o **DTS**, com fallback para PTS. E o instante do evento é
+sempre derivado do intervalo que o buffer **realmente guarda** (`GET /api/v1/buffer/stats`), nunca "agora": o
+replay de arquivo entrega os 10 minutos de vídeo em ~500 ms e chega ao fim, e depois do fim não existe "depois"
+no relógio de captura — uma janela ancorada no instante mais recente esperaria para sempre.
+
+### Validação
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `ctest` (8 suítes, incluindo `test_s4_ring_buffer` e `test_s4_ring_buffer_runtime`) | 8/8 passaram |
+| `ctest` (10 suítes) | 10/10 passaram, estáveis em execuções repetidas |
+| E2E com MP4 real: replay → evento → extração | `201`; container aceito por `qtdemux ! h264parse ! fakesink` |
+| SHA-256 do artefato | igual ao publicado no descritor **e igual entre execuções** do mesmo material |
+| Mesma extração em máquina distinta | hash idêntico dentro do container Debian e no host |
+| `scripts/smoke_e2e.sh` (6 etapas) | `SMOKE OK` |
+| `docker build --target smoke` | passa; o estágio roda o smoke contra a imagem final |
 | ThreadSanitizer nas suítes do S4.1 | nenhuma condição de corrida |
 | Daemon em container: `POST /api/v1/events` | `201` com DTO; SHA-256 do arquivo igual ao do JSON; `400` para `event_id`/janela inválidos; `500` para janela fora do buffer |
 | Buffer após mais de 30 s (arena já deu a volta) | extração continua funcionando; segmento `/dev/shm` com tamanho fixo (756 000 B no demo) |
@@ -143,7 +190,13 @@ O `MockRAMBufferFacade` continua no repositório apenas como dublê dos testes d
 - **Bibliotecas do Sistema**:
   - `sqlite3` (persistência de metadados)
   - `OpenSSL` (cálculo de hash SHA-256)
-  - `GStreamer 1.0` (captura e encode de vídeo)
+  - `GStreamer 1.0` (replay de vídeo, demux, parse H.264 e mux para MP4).
+    Em Debian/Ubuntu os pacotes necessários são `gstreamer1.0-dev`,
+    `libgstreamer-plugins-base1.0-dev` (é ele que traz o `gstreamer-app-1.0.pc`),
+    `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good` e
+    `gstreamer1.0-plugins-bad` (é onde mora o `h264parse`).
+    O `cmake` **falha** se o GStreamer não for encontrado, em vez de compilar
+    sem ele em silêncio; para desligar de propósito, `-DODS_S4_WITH_GSTREAMER=OFF`.
 
 ---
 
@@ -169,11 +222,33 @@ ctest --output-on-failure
 ### Executando o Serviço (daemon demo)
 
 ```bash
-./s4_media_evidence --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
+./build/s4_media_evidence --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
 ```
 
-O daemon inicia o ring buffer real do S4.1 em `/dev/shm/ods_s4_ring_cam0` (alimentado por uma fonte sintética,
-já que a Jetson e a câmera não estão presentes em toda máquina de desenvolvimento), extrai um clipe de exemplo e expõe a API:
+Sem `--source`, o ring buffer real do S4.1 em `/dev/shm/ods_s4_ring_<camera>` é alimentado por uma fonte
+sintética (a Jetson e a câmera não estão presentes em toda máquina de desenvolvimento).
+
+Com `--source`, o daemon **replaya um MP4 H.264 real** e extrai um clipe de vídeo de verdade — este é o caminho
+que comprova o fluxo completo:
+
+```bash
+./build/s4_media_evidence \
+  --source "video_test/10 Minutes of Amazon Rainforest (Free Download).mp4" \
+  --scenario --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
+```
+
+| Flag | Padrão | Para quê |
+|---|---|---|
+| `--port N` | `8080` | Porta HTTP; `0` deixa o sistema escolher (o daemon imprime a escolhida). |
+| `--db PATH` | `/tmp/s4_media_evidence.db` | Banco SQLite dos descritores. |
+| `--media-dir PATH` | `/tmp/s4_media_evidence` | Onde os clipes são gravados. |
+| `--source FILE` | — | Replay de um MP4 H.264 existente, em vez da fonte sintética. |
+| `--scenario` | desligado | Extrai um clipe de demonstração na subida e imprime o descritor. |
+| `--camera ID` | `cam0` | Identificador da câmera (vira o nome do segmento em `/dev/shm`). |
+| `--window-seconds N` | `30` | Segundos de ring buffer. |
+| `--bitrate BPS` | `134400` | Bitrate nominal, usado para dimensionar o ring buffer. |
+
+O daemon inicia o ring buffer e expõe a API:
 
 ```bash
 curl http://localhost:8080/api/v1/clips/<clip_id>
@@ -197,8 +272,33 @@ curl -X POST http://127.0.0.1:8080/api/v1/events \
   -d '{"event_id": "evt-2026-0002", "start_ms": 1720000000000, "end_ms": 1720000001000}'
 ```
 
+**Por relógio de captura** (caminho do S4.4; recomendado). O instante do evento tem que estar no intervalo que
+o buffer realmente guarda:
+
+```bash
+TS=$(curl -s http://127.0.0.1:8080/api/v1/buffer/stats | jq -r .newest_capture_ts_ns)
+
+curl -X POST http://127.0.0.1:8080/api/v1/events \
+  -H 'Content-Type: application/json' \
+  -d "{\"event_id\":\"evt-2026-0003\",\"capture_ts_ns\":$TS,\"pre_window_seconds\":1.0,\"post_window_seconds\":0.5}"
+```
+
 - `event_id` ausente → gerado automaticamente (`event-<uuid>`); deve conter apenas `[A-Za-z0-9_-]`.
 - Janela inválida (`start_ms >= end_ms`) → `400`; janela sem frames no buffer → `500`.
+
+O estado atual do ring buffer, incluindo o intervalo do relógio de captura, fica em
+`GET /api/v1/buffer/stats` — é o que permite escolher um `capture_ts_ns` válido:
+
+```bash
+curl -s http://127.0.0.1:8080/api/v1/buffer/stats | jq
+```
+
+| Rota | Para quê |
+|---|---|
+| `GET /healthz` | Sonda de saúde do serviço. |
+| `GET /api/v1/buffer/stats` | Quadros guardados, bytes, taxa de uso, sessão e intervalo do relógio de captura. |
+| `POST /api/v1/events` | Dispara um evento e extrai o clipe; responde `201` com o DTO. |
+| `GET /api/v1/clips/{id}` | Descritor do clipe, incluindo o SHA-256. |
 
 > **Nota de build:** o modo `Release` define `NDEBUG` e remove todos os `assert()`. Os testes do S4.1 usam
 > `ODS_CHECK` ([`tests/ods_check.hpp`](tests/ods_check.hpp)), que vale em qualquer modo de build.
@@ -226,7 +326,23 @@ curl http://127.0.0.1:8080/healthz                # {"status": "ok"}
 docker compose -f mod2/s4-media-evidence/docker-compose.yml up -d --build
 ```
 
-Detalhes, verificação (smoke test) e instruções para a **Jetson Orin Nano (arm64)** — build nativo na própria Jetson
+Há ainda um estágio `smoke`, que **não** faz parte da imagem final: ele roda
+`scripts/smoke_e2e.sh` contra a imagem de runtime e falha o build se algo estiver errado — desde o container
+decodificar o MP4 extraído até exigir que duas execuções produzam o mesmo SHA-256. As ferramentas de verificação
+(`jq`, `gstreamer1.0-tools`) ficam só nesse estágio, para não inflar a imagem de produção.
+
+```bash
+# Verificação de ponta a ponta contra a imagem construída
+docker build --target smoke -t ods/s4-media-evidence:smoke ./mod2/s4-media-evidence
+```
+
+O mesmo script roda direto na máquina, sem Docker:
+
+```bash
+./scripts/smoke_e2e.sh ./build/s4_media_evidence
+```
+
+Detalhes, verificação e instruções para a **Jetson Orin Nano (arm64)** — build nativo na própria Jetson
 ou alternativa com `buildx`/`binfmt` — estão em
 [`docs/PLANO_CONTAINERIZACAO_S4.md`](../../docs/PLANO_CONTAINERIZACAO_S4.md).
 
