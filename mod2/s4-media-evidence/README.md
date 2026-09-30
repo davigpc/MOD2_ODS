@@ -162,7 +162,7 @@ no relógio de captura — uma janela ancorada no instante mais recente esperari
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `ctest` (10 suítes) | 10/10 passaram, estáveis em execuções repetidas |
+| `ctest` (13 suítes) | 13/13, estáveis em execuções repetidas. Duas podem sair **Skipped** (`77`) em vez de aprovadas: `test_s4_replay_e2e`, sem MP4 em `video_test/`, e `test_s4_gstreamer_capture`, sem `x264enc`/`avdec_h264`. Skipped é o resultado honesto para "não executado"; para reprovar nesses casos, `-DODS_S4_REQUIRE_SAMPLE_VIDEO=ON` |
 | E2E com MP4 real: replay → evento → extração | `201`; container aceito por `qtdemux ! h264parse ! fakesink` |
 | SHA-256 do artefato | igual ao publicado no descritor **e igual entre execuções** do mesmo material |
 | Mesma extração em máquina distinta | hash idêntico dentro do container Debian e no host |
@@ -219,6 +219,10 @@ Resumo; o detalhamento está em [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-rete
     `libgstreamer-plugins-base1.0-dev` (é ele que traz o `gstreamer-app-1.0.pc`),
     `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good` e
     `gstreamer1.0-plugins-bad` (é onde mora o `h264parse`).
+    Mais `gstreamer1.0-plugins-ugly` (é onde mora o `x264enc`) e
+    `gstreamer1.0-libav` (é onde mora o `avdec_h264`): os dois não são
+    necessários para compilar, e sem eles a suíte de captura real e a
+    verificação de pixels do smoke saem como *Skipped* em vez de prova.
     O `cmake` **falha** se o GStreamer não for encontrado, em vez de compilar
     sem ele em silêncio; para desligar de propósito, `-DODS_S4_WITH_GSTREAMER=OFF`.
 
@@ -267,7 +271,7 @@ que comprova o fluxo completo:
 | `--db PATH` | `/tmp/s4_media_evidence.db` | Banco SQLite dos descritores. |
 | `--media-dir PATH` | `/tmp/s4_media_evidence` | Onde os clipes são gravados. |
 | `--source FILE` | — | Replay de um MP4 H.264 existente, em vez da fonte sintética. |
-| `--scenario` | desligado | Extrai um clipe de demonstração na subida e imprime o descritor. |
+| `--scenario` | desligado | Na subida, espera o ring buffer ter material e extrai um clipe de demonstração, imprimindo o descritor. Só produz MP4 com `--source`: a fonte sintética alimenta bytes que não são H.264 codificado, e o muxer avisa isso em vez de gravar um arquivo que só parece vídeo. |
 | `--camera ID` | `cam0` | Identificador da câmera (vira o nome do segmento em `/dev/shm`). |
 | `--window-seconds N` | `30` | Segundos de ring buffer. |
 | `--bitrate BPS` | `134400` | Bitrate nominal, usado para dimensionar o ring buffer. |
@@ -334,8 +338,11 @@ curl -s http://127.0.0.1:8080/api/v1/buffer/stats | jq
 > **Nota de build:** o modo `Release` define `NDEBUG` e remove todos os `assert()`. Os testes do S4.1 usam
 > `ODS_CHECK` ([`tests/ods_check.hpp`](tests/ods_check.hpp)), que vale em qualquer modo de build.
 
-O plano de implementação e o backlog de integração real (S4.1/S4.3) estão em
-[`docs/PLANO_IMPLEMENTACAO_S4.md`](../../docs/PLANO_IMPLEMENTACAO_S4.md).
+O plano de implementação original está em
+[`docs/PLANO_IMPLEMENTACAO_S4.md`](../../docs/PLANO_IMPLEMENTACAO_S4.md); o que
+ele listava como backlog já foi implementado — S4.1 em
+[`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md) e S4.3 em
+[`docs/S4.3-retencao-expurgo.md`](docs/S4.3-retencao-expurgo.md).
 
 ---
 
@@ -372,6 +379,11 @@ O mesmo script roda direto na máquina, sem Docker:
 ```bash
 ./scripts/smoke_e2e.sh ./build/s4_media_evidence
 ```
+
+`curl`, `jq` e `sha256sum` são obrigatórios — sem eles o script sai com erro `2`
+dizendo o que falta, em vez de morrer no meio sob `set -e`. `gst-launch-1.0` e um
+decoder H.264 são opcionais: o script avisa "pula" e continua, porque container
+aceito pelo `h264parse` e pixels decodificados são evidências diferentes.
 
 Detalhes, verificação e instruções para a **Jetson Orin Nano (arm64)** — build nativo na própria Jetson
 ou alternativa com `buildx`/`binfmt` — estão em
