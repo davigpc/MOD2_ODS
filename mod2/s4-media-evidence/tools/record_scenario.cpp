@@ -176,8 +176,10 @@ void recordScenario(const CliOptions& opts, std::unique_ptr<domain::IFrameSource
         recorded->waitUntilFinished();
     }
 #ifdef ODS_S4_WITH_GSTREAMER
-    else if (auto* gst = dynamic_cast<infrastructure::GStreamerAppsinkFrameSource*>(source.get())) {
-        // GStreamer source doesn't have waitUntilFinished, just sleep
+    else if (dynamic_cast<infrastructure::GStreamerAppsinkFrameSource*>(source.get()) != nullptr) {
+        // A fonte de GStreamer nao tem waitUntilFinished: um replay de arquivo
+        // acaba no EOS e uma camera nao acaba nunca, entao espera-se a duracao
+        // pedida mais uma folga.
         std::this_thread::sleep_for(std::chrono::duration<double>(opts.durationSec + 2.0));
     }
 #endif

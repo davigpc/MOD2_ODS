@@ -117,21 +117,24 @@ constexpr int kCaptureSettleTimeoutSeconds = 30;
 constexpr int kStablePollsRequired = 3;
 constexpr int kPollIntervalMs = 100;
 
-// Espera o ring buffer ter material suficiente E parar de crescer.
+// Espera o ring buffer ter material suficiente E, quando a fonte e finita,
+// parar de crescer.
 //
-// A segunda condicao nao e um detalhe. O replay de arquivo entrega os 10
-// minutos de video em ~500 ms, entao o primeiro poll pode encontrar o buffer
-// ainda enchendo, com o "instante mais recente" parado no meio da gravacao.
-// O cenario ancoraria num ponto que muda de execucao para execucao e
-// produziria um clipe diferente a cada rodada — o smoke test acusaria hash
-// instavel sem que nada estivesse obviamente quebrado.
+// A segunda condicao so se aplica ao replay de arquivo, e ai ela nao e um
+// detalhe: o replay entrega os 10 minutos de video em ~500 ms, entao o primeiro
+// poll pode encontrar o buffer ainda enchendo, com o "instante mais recente"
+// parado no meio da gravacao. O cenario ancoraria num ponto que muda de
+// execucao para execucao e produziria um clipe diferente a cada rodada — o smoke
+// test acusaria hash instavel sem que nada estivesse obviamente quebrado.
 //
-// Em camera ao vivo a ingestao nunca para, e o deadline e quem governa. Isso e
-// o comportamento certo: numa camera o que importa e "ja tenho N segundos", nao
-// "ja terminou".
+// Numa fonte continua (camera ao vivo ou a sintetica do demo) a ingestao nunca
+// para, e exigir que pare seria exigir o impossivel: o cenário ficaria 30
+// segundos esperando e depois desistiria sem extrair nada. E o deadline que
+// governa, porque o que importa ali e "ja tenho N segundos", nao "ja terminou".
 bool wait_for_capture_to_settle(
     const std::shared_ptr<ods::s4::infrastructure::RingBufferRAMFacade>& mediaBuffer,
-    double minSpanSeconds
+    double minSpanSeconds,
+    bool sourceIsFinite
 ) {
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(kCaptureSettleTimeoutSeconds);
@@ -142,6 +145,12 @@ bool wait_for_capture_to_settle(
     while (std::chrono::steady_clock::now() < deadline && g_stopRequested == 0) {
         const auto stats = mediaBuffer->bufferStats();
         if (stats.hasFrames && stats.spanSeconds() >= minSpanSeconds) {
+            if (!sourceIsFinite) {
+                // So ter material basta: a janela [T - pre, T] que o cenario
+                // pede ja esta no buffer, e o "depois do evento" e o proprio
+                // instante mais recente.
+                return true;
+            }
             if (stats.framesIngestedTotal == previousIngested &&
                 stats.spanSeconds() == previousSpan) {
                 ++stablePolls;
@@ -176,7 +185,8 @@ void run_demo_scenario(
     const std::shared_ptr<ods::s4::application::ExtractClipUseCase>& extractClip,
     const std::shared_ptr<ods::s4::infrastructure::RingBufferRAMFacade>& mediaBuffer,
     const std::string& mediaDir,
-    int port
+    int port,
+    bool sourceIsFinite
 ) {
     using ods::s4::domain::kNanosecondsPerSecond;
 
@@ -184,11 +194,16 @@ void run_demo_scenario(
     constexpr double kPostSeconds = 0.5;
 
     const double needed = kPreSeconds + kPostSeconds;
-    std::cout << "Waiting for the ring buffer to hold at least " << needed
-              << " s and stop growing...\n";
+    if (sourceIsFinite) {
+        std::cout << "Waiting for the ring buffer to hold at least " << needed
+                  << " s and stop growing...\n";
+    } else {
+        std::cout << "Waiting for the ring buffer to hold at least " << needed
+                  << " s...\n";
+    }
     std::cout.flush();
 
-    if (!wait_for_capture_to_settle(mediaBuffer, needed)) {
+    if (!wait_for_capture_to_settle(mediaBuffer, needed, sourceIsFinite)) {
         const auto stats = mediaBuffer->bufferStats();
         std::cerr << "ring buffer never settled holding " << needed << " s of video"
                   << " (has_frames=" << (stats.hasFrames ? "yes" : "no")
@@ -225,6 +240,17 @@ void run_demo_scenario(
         std::cout.flush();
     } catch (const std::exception& error) {
         std::cerr << "clip extraction failed: " << error.what() << '\n';
+        if (!sourceIsFinite) {
+            // A fonte sintetica alimenta o ring buffer com bytes que NAO sao
+            // H.264 codificado: existe para exercitar janela, eviccao e
+            // alinhamento a keyframe, nao para virar container. O muxer
+            // (appsrc ! h264parse ! mp4mux) nao tem o que parsear, e o
+            // resultado seria um arquivo que so parece MP4. Dizer isso e
+            // melhor que devolver um .mp4 invalido e chamar de evidencia.
+            std::cerr << "a fonte sintetica nao produz H.264 real, entao nao ha "
+                         "container a extrair aqui; para o clipe de video de "
+                         "verdade, rode com --source <arquivo.mp4>\n";
+        }
     }
 }
 
@@ -432,7 +458,9 @@ int main(int argc, char* argv[]) {
     std::cout.flush();
 
     if (runScenario) {
-        run_demo_scenario(extractClip, mediaBuffer, mediaDir, port);
+        // So o replay de arquivo tem fim; a fonte sintetica e a camera seguem
+        // ingerindo para sempre, e exigir que pare deixaria o demo sem clipe.
+        run_demo_scenario(extractClip, mediaBuffer, mediaDir, port, !sourcePath.empty());
     }
 
     std::cout << "Idle until SIGINT...\n";
