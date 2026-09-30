@@ -515,7 +515,9 @@ void test_deve_expor_pipelines_gstreamer_prontos_quando_consultados() {
     ODS_CHECK(csi.find("appsink name=ods_sink") != std::string::npos);
 
     const std::string shm = infrastructure::GStreamerAppsinkFrameSource::shmH264Pipeline("/dev/shm/p4");
-    ODS_CHECK(shm.find("shmsrc socket-path=/dev/shm/p4") != std::string::npos);
+    // O caminho vai entre aspas: sem isso um socket path com espaco (ou o
+    // nome do arquivo mp4 no replay) truncaria o parse do pipeline.
+    ODS_CHECK(shm.find("shmsrc socket-path=\"/dev/shm/p4\"") != std::string::npos);
 }
 
 int main() {

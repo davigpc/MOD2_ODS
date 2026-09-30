@@ -22,6 +22,17 @@ constexpr const char* kAppsinkTail =
 
 } // namespace
 
+namespace {
+
+// Aspas em torno de um caminho dentro de uma descricao de pipeline: sem elas
+// um nome de arquivo com espaco ("10 Minutes of Amazon Rainforest.mp4") corta
+// o parse no meio e sobra um pipeline incompleto.
+std::string quoted(const std::string& value) {
+    return "\"" + value + "\"";
+}
+
+} // namespace
+
 std::string GStreamerAppsinkFrameSource::jetsonCsiH264Pipeline(const CsiCameraOptions& o) {
     return "nvarguscamerasrc sensor-id=" + std::to_string(o.sensorId) +
            " ! video/x-raw(memory:NVMM),width=" + std::to_string(o.width) +
@@ -37,23 +48,30 @@ std::string GStreamerAppsinkFrameSource::jetsonCsiH264Pipeline(const CsiCameraOp
 }
 
 std::string GStreamerAppsinkFrameSource::shmH264Pipeline(const std::string& socketPath) {
-    return "shmsrc socket-path=" + socketPath +
+    return "shmsrc socket-path=" + quoted(socketPath) +
            " is-live=true do-timestamp=true ! h264parse config-interval=-1 ! " + kH264Caps +
            " ! " + kAppsinkTail;
 }
 
 std::string GStreamerAppsinkFrameSource::fileReplayH264Pipeline(const std::string& path) {
-    return "filesrc location=" + path + " ! qtdemux ! h264parse config-interval=-1 ! " +
+    return "filesrc location=" + quoted(path) + " ! qtdemux ! h264parse config-interval=-1 ! " +
            kH264Caps + " ! " + kAppsinkTail;
 }
 
 std::string GStreamerAppsinkFrameSource::testPatternH264Pipeline(
     int width, int height, int fps, int bitrateKbps, int gop
 ) {
+    // openh264enc e o encoder H.264 que acompanha o plugin gstreamer1-plugin-
+    // openh264, ao contrario do x264enc (que vive no pacote bad/good e nao vem
+    // em varias imagens). A propriedade do intervalo de keyframes chama-se
+    // gop-size; sem ela o stream sairia com um unico IDR e o S4.1 nunca
+    // encontraria um keyframe para alinhar o inicio do trecho.
+    // Na Jetson este caminho nao e o de producao: a camera usa
+    // jetsonCsiH264Pipeline(), com o encoder de hardware NVENC.
     return "videotestsrc is-live=true ! video/x-raw,width=" + std::to_string(width) +
            ",height=" + std::to_string(height) + ",framerate=" + std::to_string(fps) +
-           "/1 ! x264enc tune=zerolatency bitrate=" + std::to_string(bitrateKbps) +
-           " key-int-max=" + std::to_string(gop) + " ! h264parse config-interval=-1 ! " +
+           "/1 ! openh264enc bitrate=" + std::to_string(bitrateKbps * 1000) +
+           " gop-size=" + std::to_string(gop) + " ! h264parse config-interval=-1 ! " +
            kH264Caps + " ! " + kAppsinkTail;
 }
 
@@ -81,10 +99,19 @@ namespace {
 //
 // Usa o DTS quando ele existe: o buffer guarda os quadros em ORDEM DE
 // DECODIFICACAO, que e a ordem em que o appsink os entrega e a unica em que a
-// concatenacao forma um H.264 valido. Com B-frames (replay de .mp4 comum) o PTS
-// sai fora dessa ordem (I P B B ...) e o RingBuffer rejeitaria cada B-frame
-// como relogio retrocedendo. Sem B-frames — o caso do NVENC de P4 — DTS e PTS
-// coincidem, entao o valor continua sendo o instante de captura.
+// concatenacao forma um H.264 valido. Com B-frames (replay de .mp4 comum, e o
+// caso do video de video_test/) o PTS e a ordem de APRESENTACAO e chega fora de
+// ordem -- 0, 100 ms, 33 ms, 133 ms... -- e o RingBuffer exige ordem de CHEGADA,
+// descartando qualquer quadro com captureTs menor que o ultimo: 2 de cada 3
+// quadros desse video seriam rejeitados. O DTS e monotonico na ordem de
+// decodificacao, que e exatamente a ordem em que os access units saem do
+// demuxer. Sem B-frames, que e o caso do NVENC de P4, DTS e PTS coincidem e o
+// valor continua sendo o instante de captura; fonte sem DTS cai no PTS.
+//
+// Quadro sem DTS E sem PTS e descartado: nao ha onde posiciona-lo na linha do
+// tempo, e carimba-lo com o base_time do pipeline o colocaria no comeco da
+// gravacao -- o RingBuffer o rejeitaria como relogio retrocedendo e a perda
+// seria silenciosa.
 //
 // Ponto de acoplamento com B2: quando TRA-1/TRA-2 fecharem a base de tempo
 // oficial (por exemplo o timestamp que P4 grava via GstReferenceTimestampMeta),
@@ -160,12 +187,22 @@ void GStreamerAppsinkFrameSource::start(domain::FrameCallback onFrame) {
 
     GError* error = nullptr;
     m_impl->pipeline = gst_parse_launch(m_pipelineDescription.c_str(), &error);
-    if (m_impl->pipeline == nullptr) {
+    // gst_parse_launch devolve um pipeline parcial e um GError quando encontra
+    // erro no meio da descricao. Aceitar esse parcial adia a falha para um
+    // sintoma enganoso (ex: "pipeline must end in appsink"), entao qualquer
+    // GError aqui ja e falha definitiva.
+    if (m_impl->pipeline == nullptr || error != nullptr) {
         const std::string message = error != nullptr ? error->message : "unknown";
+        if (m_impl->pipeline != nullptr) {
+            gst_object_unref(m_impl->pipeline);
+            m_impl->pipeline = nullptr;
+        }
         if (error != nullptr) {
             g_error_free(error);
         }
-        throw domain::FrameSourceError("invalid pipeline: " + message);
+        throw domain::FrameSourceError(
+            "invalid pipeline [" + m_pipelineDescription + "]: " + message
+        );
     }
 
     m_impl->sink = gst_bin_get_by_name(GST_BIN(m_impl->pipeline), "ods_sink");

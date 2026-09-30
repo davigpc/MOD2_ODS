@@ -21,6 +21,11 @@ namespace ods::s4::presentation {
 
 namespace {
 
+// Teto de espera pelo pos-evento no relogio de captura. Acima disso a thread do
+// servidor ficaria presa esperando frames que talvez nunca cheguem (stream
+// parado), e o cliente veria um timeout em vez de um erro explicito.
+constexpr double kCaptureWindowWaitTimeoutSeconds = 10.0;
+
 std::string json_escape(const std::string& value) {
     std::string out;
     out.reserve(value.size());
@@ -126,6 +131,108 @@ std::optional<long long> extract_json_int(const std::string& body, const std::st
     }
 }
 
+// Campos aceitos por POST /api/v1/events, ja validados.
+struct EventRequest {
+    std::string eventId;
+    // Janela em relogio de CAPTURA (ns). Ausente = "agora" no relogio de captura.
+    bool hasCaptureTs{false};
+    domain::Nanoseconds captureTsNs{0};
+    double preSeconds{0.0};
+    double postSeconds{0.0};
+    // Caminho legado: janela em relogio de PAREDE (ms desde a epoch).
+    bool hasWallClockWindow{false};
+    std::chrono::system_clock::time_point wallStart{};
+    std::chrono::system_clock::time_point wallEnd{};
+};
+
+class InvalidEventRequest : public std::runtime_error {
+public:
+    explicit InvalidEventRequest(const std::string& what) : std::runtime_error(what) {}
+};
+
+std::optional<double> extract_json_double(const std::string& body, const std::string& key) {
+    const std::string pattern = "\"" + key + "\"";
+    const std::size_t keyPos = body.find(pattern);
+    if (keyPos == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::size_t colon = body.find(':', keyPos + pattern.size());
+    if (colon == std::string::npos) {
+        return std::nullopt;
+    }
+    const std::size_t begin = body.find_first_not_of(" \t\r\n", colon + 1);
+    if (begin == std::string::npos) {
+        return std::nullopt;
+    }
+    std::size_t end = begin;
+    while (end < body.size() &&
+           (std::isdigit(static_cast<unsigned char>(body[end])) || body[end] == '-' ||
+            body[end] == '+' || body[end] == '.' || body[end] == 'e' || body[end] == 'E')) {
+        ++end;
+    }
+    if (end == begin) {
+        return std::nullopt;
+    }
+    try {
+        return std::stod(body.substr(begin, end - begin));
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+EventRequest parse_event_request(const std::string& body) {
+    EventRequest request;
+    request.eventId = extract_json_string(body, "event_id");
+
+    const auto captureTs = extract_json_int(body, "capture_ts_ns");
+    if (captureTs.has_value()) {
+        request.hasCaptureTs = true;
+        request.captureTsNs = static_cast<domain::Nanoseconds>(*captureTs);
+    }
+    if (const auto pre = extract_json_double(body, "pre_window_seconds"); pre.has_value()) {
+        request.preSeconds = *pre;
+    }
+    if (const auto post = extract_json_double(body, "post_window_seconds"); post.has_value()) {
+        request.postSeconds = *post;
+    }
+    if (request.preSeconds < 0.0 || request.postSeconds < 0.0) {
+        throw InvalidEventRequest("pre_window_seconds and post_window_seconds must not be negative");
+    }
+
+    const auto startMs = extract_json_int(body, "start_ms");
+    const auto endMs = extract_json_int(body, "end_ms");
+    if (startMs.has_value() && endMs.has_value()) {
+        request.hasWallClockWindow = true;
+        using Clock = std::chrono::system_clock;
+        request.wallStart = Clock::time_point(std::chrono::milliseconds(*startMs));
+        request.wallEnd = Clock::time_point(std::chrono::milliseconds(*endMs));
+        if (request.wallStart >= request.wallEnd) {
+            throw InvalidEventRequest("start_ms must be earlier than end_ms");
+        }
+    }
+    return request;
+}
+
+std::string buffer_stats_to_json(const domain::BufferStats& stats) {
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"capacity_bytes\": " << stats.capacityBytes << ",\n";
+    out << "  \"bytes_used\": " << stats.bytesUsed << ",\n";
+    out << "  \"fill_ratio\": " << format_double(stats.fillRatio()) << ",\n";
+    out << "  \"frames_stored\": " << stats.framesStored << ",\n";
+    out << "  \"frames_ingested_total\": " << stats.framesIngestedTotal << ",\n";
+    out << "  \"frames_evicted_total\": " << stats.framesEvictedTotal << ",\n";
+    out << "  \"has_frames\": " << (stats.hasFrames ? "true" : "false") << ",\n";
+    out << "  \"session_id\": \"" << json_escape(stats.sessionId) << "\",\n";
+    out << "  \"span_seconds\": " << format_double(stats.spanSeconds()) << ",\n";
+    // A faixa de capture_ts e o que permite a um cliente alinhar uma janela sem
+    // chutar: ela esta no mesmo relogio de capture_ts_ns aceito no evento.
+    out << "  \"oldest_capture_ts_ns\": " << stats.oldestCaptureTsNs << ",\n";
+    out << "  \"newest_capture_ts_ns\": " << stats.newestCaptureTsNs << "\n";
+    out << "}";
+    return out.str();
+}
+
 std::string to_json(const application::ClipDescriptorDTO& dto) {
     std::ostringstream out;
     out << "{\n";
@@ -210,12 +317,41 @@ ClipDescriptorHttpServer::ClipDescriptorHttpServer(
         });
 
     if (m_impl->clipUseCase) {
+        // Faixa de capture_ts realmente disponivel. Sem este endpoint o
+        // cliente nao tem como saber em que relogio a janela deve ser pedida.
+        m_impl->server.Get("/api/v1/buffer/stats", [this](
+            const httplib::Request&, httplib::Response& response
+        ) {
+            try {
+                const auto captureBuffer = m_impl->clipUseCase->captureBuffer();
+                if (!captureBuffer) {
+                    response.status = 501;
+                    response.set_content(
+                        R"({"error":"buffer statistics require a capture buffer"})",
+                        "application/json"
+                    );
+                    return;
+                }
+                response.status = 200;
+                response.set_content(
+                    buffer_stats_to_json(captureBuffer->bufferStats()),
+                    "application/json; charset=utf-8"
+                );
+            } catch (const std::exception& error) {
+                response.status = 500;
+                response.set_content(
+                    "{\"error\":\"" + json_escape(error.what()) + "\"}",
+                    "application/json"
+                );
+            }
+        });
+
         m_impl->server.Post("/api/v1/events",
             [this](const httplib::Request& request, httplib::Response& response) {
                 try {
-                    const std::string& body = request.body;
+                    const EventRequest parsed = parse_event_request(request.body);
 
-                    std::string eventId = extract_json_string(body, "event_id");
+                    std::string eventId = parsed.eventId;
                     if (eventId.empty()) {
                         eventId = generate_event_id();
                     }
@@ -225,14 +361,50 @@ ClipDescriptorHttpServer::ClipDescriptorHttpServer(
                         return;
                     }
 
+                    const std::string outputPath =
+                        (std::filesystem::path(m_impl->mediaDir) / (eventId + ".mp4")).string();
+
+                    // Caminho do fluxo real: janela no relogio de captura,
+                    // esperando o pos-evento, e um container MP4 de verdade.
+                    if (m_impl->clipUseCase->supportsCaptureWindows() && !parsed.hasWallClockWindow) {
+                        const auto captureBuffer = m_impl->clipUseCase->captureBuffer();
+                        const domain::Nanoseconds eventTs = parsed.hasCaptureTs
+                            ? parsed.captureTsNs
+                            : captureBuffer->newestCaptureTsNs();
+                        if (eventTs == 0) {
+                            response.status = 409;
+                            response.set_content(
+                                R"({"error":"no frames captured yet; the buffer clock is not started"})",
+                                "application/json"
+                            );
+                            return;
+                        }
+                        const domain::CaptureWindow window = domain::CaptureWindow::around(
+                            eventTs,
+                            parsed.preSeconds,
+                            parsed.postSeconds
+                        );
+                        // Teto de espera pelo fim da janela: sem ele, um
+                        // post_window_seconds grande prenderia a thread do
+                        // servidor ate o timeout do cliente.
+                        const auto clip = m_impl->clipUseCase->executeCaptureWindow(
+                            eventId, window, outputPath, kCaptureWindowWaitTimeoutSeconds
+                        );
+                        const auto descriptor = m_impl->controller->getClipDescriptor(clip.clipId());
+                        response.status = 201;
+                        response.set_content(
+                            to_json(*descriptor), "application/json; charset=utf-8"
+                        );
+                        return;
+                    }
+
+                    // Caminho legado: janela explicita em relogio de parede.
                     using Clock = std::chrono::system_clock;
                     auto start = Clock::now() - std::chrono::seconds(1);
                     auto end = Clock::now();
-                    if (const auto startMs = extract_json_int(body, "start_ms"); startMs.has_value()) {
-                        start = Clock::time_point(std::chrono::milliseconds(*startMs));
-                    }
-                    if (const auto endMs = extract_json_int(body, "end_ms"); endMs.has_value()) {
-                        end = Clock::time_point(std::chrono::milliseconds(*endMs));
+                    if (parsed.hasWallClockWindow) {
+                        start = parsed.wallStart;
+                        end = parsed.wallEnd;
                     }
                     if (start >= end) {
                         response.status = 400;
@@ -244,12 +416,16 @@ ClipDescriptorHttpServer::ClipDescriptorHttpServer(
                     }
 
                     const domain::TimeWindow timeWindow(start, end);
-                    const std::string outputPath =
-                        (std::filesystem::path(m_impl->mediaDir) / (eventId + ".mp4")).string();
                     const auto clip = m_impl->clipUseCase->execute(eventId, timeWindow, outputPath);
                     const auto descriptor = m_impl->controller->getClipDescriptor(clip.clipId());
                     response.status = 201;
                     response.set_content(to_json(*descriptor), "application/json; charset=utf-8");
+                } catch (const InvalidEventRequest& error) {
+                    response.status = 400;
+                    response.set_content(
+                        "{\"error\":\"" + json_escape(error.what()) + "\"}",
+                        "application/json"
+                    );
                 } catch (const std::exception& error) {
                     response.status = 500;
                     response.set_content(
