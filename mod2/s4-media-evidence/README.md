@@ -28,7 +28,7 @@ mod2/s4-media-evidence/
 │   │   ├── strategies/         # Padrão GoF Strategy de retenção (IRetentionStrategy)
 │   │   └── errors/             # Hierarquia de exceções de domínio
 │   ├── application/            # 2. Orquestração de casos de uso e DTOs
-│   │   ├── use_cases/          # Casos de uso (ExtractClipUseCase, PurgeMediaUseCase futuro)
+│   │   ├── use_cases/          # Casos de uso (ExtractClipUseCase, PurgeMediaUseCase)
 │   │   └── dtos/               # Data Transfer Objects (ClipDescriptorDTO, ISO 8601)
 │   ├── infrastructure/         # 3. Adaptadores e integrações externas
 │   │   ├── database/           # Implementações de repositório (SQLite, In-Memory)
@@ -38,6 +38,7 @@ mod2/s4-media-evidence/
 │   │   │                       #   e a fonte de captura (appsink_frame_source)
 │   │   ├── ringbuffer/         # S4.1: arena /dev/shm, ponte de relógios,
 │   │   │                       #   fonte sintética e cenário gravado
+│   │   ├── retention/          # S4.3: daemon de expurgo, statvfs, log de expurgo
 │   │   └── b3_bus/             # Consumidor de eventos do Barramento B3 (contrato)
 │   └── presentation/           # 4. Controladores e exposição de API
 │       └── http/               # Controller + servidor REST (ClipDescriptorHttpServer)
@@ -61,7 +62,7 @@ Conforme definido em [`docs/responsability.md`](../../docs/responsability.md):
 | :--- | :--- | :--- | :--- |
 | **S4.1 — Ring Buffer Contínuo** | Gravação circular em RAM (`/dev/shm`) dos últimos $N$ segundos pré-evento, com alinhamento a keyframe e espera do pós-evento. **Implementado**: `RingBufferRAMFacade` (substitui o `MockRAMBufferFacade`, que permanece como dublê de teste). Ver [`docs/S4.1-ring-buffer.md`](docs/S4.1-ring-buffer.md). | Facade + POSIX Shared Memory / GStreamer | Henrique Azevedo |
 | **S4.2 — Binding Evento-Mídia** | Extração de trecho pré/pós evento da RAM, exportação em arquivo e hash SHA-256 real (OpenSSL). **Implementado** | Command Handler + SHA-256 | Davi Gomes |
-| **S4.3 — Retenção & Expurgo LGPD** | Expurgo automático após 7 dias (LGPD) ou emergencial a 85% do NVMe (`is_locked_for_audit`). **Diferido** (somente contrato `IRetentionStrategy`). | Daemon Worker + Strategy Pattern | Henrique Azevedo |
+| **S4.3 — Retenção & Expurgo LGPD** | Expurgo automático após 7 dias (LGPD) e emergencial FIFO a 85% do NVMe (`statvfs`), respeitando `is_locked_for_audit`. **Implementado**: `PurgeDaemon` + `LgpdRetentionStrategy` / `DiskQuotaFifoStrategy`, ligado no `main.cpp`. Ver [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-retencao-expurgo.md). | Daemon Worker + Strategy Pattern | Henrique Azevedo |
 | **S4.4 — API Descritores de Clipe** | Exposição de metadados e URIs locais sem trafegar vídeo binário. **Implementado**: REST `GET /api/v1/clips/{id}` + `POST /api/v1/events` (simulação de novo evento em runtime) | REST Controller + Clean Architecture | Davi Gomes |
 
 ---
@@ -125,6 +126,29 @@ O `MockRAMBufferFacade` continua no repositório apenas como dublê dos testes d
 | Buffer após mais de 30 s (arena já deu a volta) | extração continua funcionando; segmento `/dev/shm` com tamanho fixo (756 000 B no demo) |
 | `docker stop` com eventos chegando | encerramento limpo (exit 0), sem acesso à arena já desmapeada |
 
+### Revalidação (29/09/2026, WSL Ubuntu 24.04, GCC 13.3, **com** GStreamer 1.24)
+
+| Verificação | Resultado |
+| :--- | :--- |
+| Build com GStreamer instalado | **quebrava** (`Impl` privado usado pela callback do appsink) — corrigido |
+| Captura real `videotestsrc → x264enc → appsink` (`test_s4_gstreamer_capture`) | quadros ingeridos sem rejeição; trecho extraído começa em keyframe e **decodifica** no `avdec_h264` |
+| Stream com B-frames (replay de `.mp4` comum, como o `video_test/`) | antes: ~2 de cada 3 quadros rejeitados (PTS fora de ordem); agora o carimbo usa o DTS |
+| `isTruncatedAtStart` com keyframe anterior já expulso | antes: `false` mesmo perdendo parte do "antes"; agora `true` |
+| `stopCapture()` com extração esperando o pós-evento | wakeup perdido podia prender a extração até o timeout; corrigido |
+| `ctest`, ASan + UBSan, ThreadSanitizer | tudo passando; nenhuma condição de corrida |
+
+---
+
+## 🗑️ S4.3 — Retenção & Expurgo LGPD: entrada → processamento → saída
+
+Resumo; o detalhamento está em [`docs/S4.3-retencao-expurgo.md`](docs/S4.3-retencao-expurgo.md).
+
+| | |
+| :--- | :--- |
+| **Recebe** | Ocupação do NVMe (`statvfs` no `--media-dir`) + clipes do SQLite com `created_at`, `is_retained` e `is_locked_for_audit` |
+| **Faz** | Um daemon varre ao iniciar, a cada 1 h e **na hora** em que o disco passa de 85% (checagem a cada 30 s). Cada varredura aplica, em ordem, `LgpdRetentionStrategy` (idade ≥ 7 dias) e `DiskQuotaFifoStrategy` (mais antigo primeiro, até 80%). Mídia travada para auditoria nunca é apagada — a trava é relida logo antes de cada exclusão |
+| **Entrega** | Arquivo removido do NVMe, `is_retained = false` no SQLite (a API passa a mostrar isso), uma linha por mídia em `s4_purge_log.jsonl` e, se o disco está cheio sem nada apagável, `DiskQuotaExceededError` (alerta `[S4.3] ALERT` no stderr) |
+
 ---
 
 ## 📐 Padrões GoF Implementados
@@ -179,6 +203,13 @@ já que a Jetson e a câmera não estão presentes em toda máquina de desenvolv
 curl http://localhost:8080/api/v1/clips/<clip_id>
 sha256sum /tmp/s4-media/event-demo.mp4   # deve bater com "sha256_hash" do JSON
 ls -lh /dev/shm/ods_s4_ring_cam0         # o buffer circular, enquanto o daemon roda
+```
+
+O daemon também sobe o expurgo do S4.3. Parâmetros opcionais (padrões do guia):
+
+```bash
+./s4_media_evidence ... --retention-days 7 --quota-trigger 0.85 --quota-target 0.80 \
+    --sweep-interval 3600 --disk-check-interval 30 --purge-log /tmp/s4_purge_log.jsonl
 ```
 
 ### Simulando uma nova entrada de evento
@@ -241,4 +272,4 @@ Antes de submeter código ou PR:
 - [x] **Tratamento de Exceções**: Uso de exceções tipadas de `DomainError` e `ApplicationError`.
 - [x] **Conformidade LGPD**: Entidade `MediaClip` possui controle de tempo de retenção e flag de trava de auditoria (`is_locked_for_audit`).
 - [x] **Testes de Unidade**: Suíte `deve_..._quando_...` passando (unit + integration).
-- [ ] **S4.3 — Expurgo LGPD**: pendente (contrato `IRetentionStrategy`; implementação real no backlog da Henrique).
+- [x] **S4.3 — Expurgo LGPD**: prazo de 7 dias + cota FIFO a 85% com trava de auditoria, daemon ligado no `main.cpp` (`test_s4_retention`, `test_s4_retention_runtime`).
