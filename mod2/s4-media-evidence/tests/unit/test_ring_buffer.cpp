@@ -330,6 +330,29 @@ void test_deve_usar_primeiro_keyframe_dentro_da_janela_quando_o_anterior_ja_foi_
     const auto segment = buffer.segmentFor(CaptureWindow(5 * S / 10, 3 * S));
 
     ODS_CHECK(segment.firstCaptureTsNs() == 2 * S);
+}
+
+// Pediu-se a partir de 0,5 s e o trecho so comeca em 2 s: 1,5 s do "antes"
+// ficou de fora, ainda que o buffer tenha quadros (P orfaos) desde 0 s.
+void test_deve_marcar_truncamento_no_inicio_quando_keyframe_anterior_ja_foi_expulso() {
+    auto buffer = make_buffer(10000);
+    push(buffer, 0, 1, false);
+    push(buffer, 1 * S, 1, false);
+    push(buffer, 2 * S, 1, true);
+    push(buffer, 3 * S, 1, false);
+
+    const auto segment = buffer.segmentFor(CaptureWindow(5 * S / 10, 3 * S));
+
+    ODS_CHECK(segment.isTruncatedAtStart);
+}
+
+void test_nao_deve_marcar_truncamento_no_inicio_quando_trecho_recuar_ate_keyframe_anterior() {
+    auto buffer = make_buffer(10000);
+    build_gop_stream(buffer, 10);
+
+    const auto segment = buffer.segmentFor(CaptureWindow(35 * S / 10, 5 * S));
+
+    ODS_CHECK(segment.firstCaptureTsNs() < 35 * S / 10);
     ODS_CHECK(!segment.isTruncatedAtStart);
 }
 
@@ -454,6 +477,8 @@ int main() {
     test_deve_lancar_excecao_quando_nenhum_quadro_estiver_na_janela();
     test_deve_lancar_excecao_quando_buffer_estiver_vazio();
     test_deve_usar_primeiro_keyframe_dentro_da_janela_quando_o_anterior_ja_foi_expulso();
+    test_deve_marcar_truncamento_no_inicio_quando_keyframe_anterior_ja_foi_expulso();
+    test_nao_deve_marcar_truncamento_no_inicio_quando_trecho_recuar_ate_keyframe_anterior();
     test_deve_lancar_excecao_quando_nao_houver_keyframe_decodificavel();
 
     test_deve_reportar_estatisticas_coerentes_quando_houver_expulsoes();

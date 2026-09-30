@@ -54,8 +54,12 @@ public:
         return m_pipelineDescription;
     }
 
+    // Esconde gst/*.h de quem inclui este header (pimpl). O NOME e publico
+    // porque a callback C do appsink (on_new_sample, no .cpp) precisa dele; a
+    // definicao continua visivel apenas no .cpp.
+    struct Impl;
+
 private:
-    struct Impl;   // esconde gst/*.h de quem inclui este header (pimpl)
     Impl* m_impl;
     std::string m_pipelineDescription;
     std::string m_sessionId;
