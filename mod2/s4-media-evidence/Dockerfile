@@ -24,6 +24,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 # ctest passa -- com o caminho de GStreamer silenciosamente desligado, porque o
 # unico teste de MP4 real e compilado sob #ifdef. Foi assim que uma imagem
 # inteira saiu daqui sem conseguir reproduzir um unico quadro.
+#
+# E o mesmo raciocinio vale para os dois ultimos pacotes, por um motivo
+# diferente: x264enc (plugins-ugly) e avdec_h264 (libav) sao o que o
+# test_s4_gstreamer_capture usa para codificar e decodificar um trecho de
+# verdade. Sem eles o teste sai com 77 e o CTest o reporta como Skipped — honesto,
+# mas a imagem para de provar que o material de video passa pelo encoder e pelo
+# decoder. E avdec_h264 e o mesmo elemento que o smoke procura para verificar
+# pixels; sem ele esse ramo do smoke tambem vira "pula".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         g++ \
         cmake \
@@ -37,6 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gstreamer1.0-plugins-base \
         gstreamer1.0-plugins-good \
         gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-ugly \
+        gstreamer1.0-libav \
         gstreamer1.0-tools \
     && rm -rf /var/lib/apt/lists/*
 
@@ -53,8 +63,14 @@ COPY third_party ./third_party
 COPY scenarios ./scenarios
 COPY video_test ./video_test
 
-# Release build; falha de teste aqui impede a imagem final
-RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+# Release build; falha de teste aqui impede a imagem final.
+#
+# ODS_S4_REQUIRE_SAMPLE_VIDEO=ON porque aqui o video de teste ESTA no contexto
+# (a linha COPY video_test acima): se ele sumisse, o cenario de replay deixaria
+# de rodar e sairia com 77 — "Skipped", que o build aceitaria. Com a option, a
+# ausencia do material reprova. Numa imagem que tem o video,(video ausente) e
+# uma falha de build, nao uma opcao.
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DODS_S4_REQUIRE_SAMPLE_VIDEO=ON \
  && cmake --build build -j"$(nproc)" \
  && ctest --test-dir build --output-on-failure
 
@@ -112,9 +128,15 @@ FROM runtime AS smoke
 
 USER root
 
+# libav entra pelo mesmo motivo do builder: e o que da ao smoke um decoder
+# H.264 para conferir pixels de verdade. Sem ele o script segue funcionando e
+# imprime "pula sem decoder" — honesto, porem fraco: o ramo de pixels do smoke
+# so vira prova se existe decoder, e nao ha decoder em debian-slim sem este
+# pacote.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         jq \
         gstreamer1.0-tools \
+        gstreamer1.0-libav \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/smoke_e2e.sh /app/scripts/smoke_e2e.sh

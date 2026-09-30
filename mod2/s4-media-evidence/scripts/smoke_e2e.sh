@@ -13,6 +13,12 @@
 # O ultimo item e o que diferencia "funciona" de "e evidencia": um hash que
 # muda a cada extracao do mesmo footage nao identifica nada.
 #
+# Ferramentas: curl, jq e sha256sum sao OBRIGATORIAS — sem elas o script nao
+# consegue conferir o hash, e um smoke que pula a verificacao central sem dizer
+# que pulou seria pior do que nao rodar. gst-launch-1.0 e um decoder H.264
+# (vaapih264dec/avdec_h264) sao OPCIONAIS: sem eles o script diz "pula" e segue,
+# deixando claro no log que container e pixels sao coisas diferentes.
+#
 # Uso: scripts/smoke_e2e.sh [caminho/para/o/binario] [caminho/para/o/mp4]
 
 set -euo pipefail
@@ -40,6 +46,22 @@ if [[ ! -x "${BINARY}" ]]; then
 fi
 if [[ ! -f "${SOURCE}" ]]; then
     echo "ERRO: nenhum MP4 de teste encontrado. Passe o caminho como segundo argumento." >&2
+    exit 2
+fi
+
+# Pre-flight das ferramentas obrigatorias, com o motivo de cada uma. Sem este
+# check o script morre no meio, sob "set -e", em um "jq: command not found" que
+# parece falha do S4 e nao e: e a maquina sem ferramenta. E o pior desfecho
+# seria o script aceitar a ausencia e sair com SMOKE OK sem ter conferido hash
+# de nada — que e exatamente o buraco que este smoke existe para fechar.
+MISSING=()
+for tool in curl jq sha256sum; do
+    command -v "${tool}" >/dev/null 2>&1 || MISSING+=("${tool}")
+done
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+    echo "ERRO: ferramenta(s) obrigatoria(s) ausente(s): ${MISSING[*]}" >&2
+    echo "      Fedora: sudo dnf install -y curl jq coreutils" >&2
+    echo "      Debian: sudo apt-get install -y curl jq coreutils" >&2
     exit 2
 fi
 
