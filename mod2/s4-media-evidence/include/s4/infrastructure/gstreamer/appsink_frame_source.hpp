@@ -54,10 +54,10 @@ public:
         return m_pipelineDescription;
     }
 
-    // Estado opaco do pimpl. So a declaracao aparece aqui, entao quem inclui
-    // este header continua sem ver gst/*.h. E publico de proposito: as funcoes
-    // de callback do GStreamer (new-sample) sao funcoes livres no .cpp e
-    // precisam alcancar este tipo.
+    // Estado opaco do pimpl: esconde gst/*.h de quem inclui este header, e a
+    // definicao continua visivel apenas no .cpp. O NOME e publico de proposito
+    // porque a callback C do appsink (on_new_sample, funcao livre no .cpp) e
+    // as funcoes de callback precisam alcancar este tipo.
     struct Impl;
 
 private:

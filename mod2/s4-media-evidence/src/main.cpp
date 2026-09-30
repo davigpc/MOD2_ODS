@@ -1,7 +1,14 @@
 #include "s4/application/use_cases/extract_clip.hpp"
+#include "s4/application/use_cases/purge_media.hpp"
+#include "s4/domain/strategies/disk_quota_fifo_strategy.hpp"
+#include "s4/domain/strategies/lgpd_retention_strategy.hpp"
 #include "s4/infrastructure/database/sqlite_media_clip_repository.hpp"
 #include "s4/infrastructure/filesystem/file_storage.hpp"
 #include "s4/infrastructure/gstreamer/ring_buffer_ram_facade.hpp"
+#include "s4/infrastructure/retention/json_lines_purge_log.hpp"
+#include "s4/infrastructure/retention/purge_daemon.hpp"
+#include "s4/infrastructure/retention/statvfs_disk_usage_provider.hpp"
+#include "s4/infrastructure/retention/system_clock.hpp"
 #include "s4/infrastructure/ringbuffer/synthetic_frame_source.hpp"
 #include "s4/presentation/http/clip_descriptor_http_server.hpp"
 
@@ -16,6 +23,7 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -32,6 +40,8 @@ void print_usage(const char* program) {
               << " [--port PORT] [--db PATH] [--media-dir PATH]\n"
                  "       [--source FILE] [--scenario] [--camera ID]\n"
                  "       [--window-seconds N] [--bitrate BPS]\n"
+                 "       [--retention-days DAYS] [--quota-trigger RATIO] [--quota-target RATIO]\n"
+                 "       [--sweep-interval SECONDS] [--disk-check-interval SECONDS] [--purge-log PATH]\n"
                  "\n"
                  "  --source FILE     replay de um MP4 H.264 existente, em vez da\n"
                  "                    fonte sintetica. E o caminho que produz um clipe\n"
@@ -42,7 +52,56 @@ void print_usage(const char* program) {
                  "  --camera ID        id da camera (padrao: cam0)\n"
                  "  --window-seconds N  segundos de ring buffer (padrao: 30)\n"
                  "  --bitrate BPS     bitrate nominal usado para dimensionar o\n"
-                 "                    ring buffer (padrao: 134400)\n";
+                 "                    ring buffer (padrao: 134400)\n"
+                 "\n"
+                 "  --retention-days N   dias que a midia fica guardada (padrao: 7, LGPD)\n"
+                 "  --quota-trigger R     ocupacao do NVMe que dispara o expurgo (padrao: 0.85)\n"
+                 "  --quota-target R      ocupacao a que o expurgo volta (padrao: 0.80)\n"
+                 "  --sweep-interval N      segundos entre varreduras de prazo (padrao: 3600)\n"
+                 "  --disk-check-interval N  segundos entre consultas de statvfs (padrao: 30)\n"
+                 "  --purge-log PATH        log JSONL do expurgo (padrao: ao lado do banco)\n";
+}
+
+// S4.3 — parametros do expurgo. Os padroes sao os do guia: 7 dias (LGPD) e
+// gatilho de 85% do NVMe.
+struct RetentionOptions {
+    double retentionDays{7.0};
+    double quotaTrigger{ods::s4::domain::QuotaPolicy::kDefaultTriggerRatio};
+    double quotaTarget{ods::s4::domain::QuotaPolicy::kDefaultTargetRatio};
+    long long sweepIntervalSeconds{3600};
+    long long diskCheckIntervalSeconds{30};
+    std::string purgeLogPath;
+};
+
+// Os dois shared_ptr chegam POR COPIA e sao movidos para dentro do caso de uso.
+// O chamador tambem precisa deles: o extrator de clipes usa o mesmo repositorio
+// e o mesmo FileStorage, e um std::move no call site deixaria o extrator com
+// ponteiro nulo — sintoma: expurgo funcionando e API sem responder.
+std::unique_ptr<ods::s4::infrastructure::PurgeDaemon> make_purge_daemon(
+    const RetentionOptions& options,
+    std::shared_ptr<ods::s4::domain::IMediaClipRepository> repository,
+    std::shared_ptr<ods::s4::domain::IFileStorage> fileStorage,
+    const std::string& mediaDir
+) {
+    using namespace ods::s4;
+    const domain::RetentionPolicy retention(std::chrono::seconds(
+        static_cast<long long>(options.retentionDays * 24 * 3600)));
+    const domain::QuotaPolicy quota(options.quotaTrigger, options.quotaTarget);
+    auto diskUsage = std::make_shared<infrastructure::StatvfsDiskUsageProvider>(mediaDir);
+
+    auto purgeMedia = std::make_shared<application::PurgeMediaUseCase>(
+        std::move(repository), std::move(fileStorage), diskUsage,
+        std::make_shared<infrastructure::JsonLinesPurgeLog>(options.purgeLogPath),
+        std::make_shared<infrastructure::SystemClock>(),
+        std::vector<std::shared_ptr<const domain::IRetentionStrategy>>{
+            std::make_shared<domain::LgpdRetentionStrategy>(retention),
+            std::make_shared<domain::DiskQuotaFifoStrategy>(quota),
+        });
+
+    infrastructure::PurgeDaemonConfig config;
+    config.retentionSweepInterval = std::chrono::seconds(options.sweepIntervalSeconds);
+    config.diskCheckInterval = std::chrono::seconds(options.diskCheckIntervalSeconds);
+    return std::make_unique<infrastructure::PurgeDaemon>(purgeMedia, diskUsage, quota, config);
 }
 
 // Quanto tempo o daemon espera a ingestao chegar num estado utilizavel antes
@@ -176,41 +235,71 @@ int main(int argc, char* argv[]) {
     int port = 8080;
     std::string dbPath = "/tmp/s4_media_evidence.db";
     std::string mediaDir = "/tmp/s4_media_evidence";
+    // S4.1/S4.4 — captura e replay.
     std::string sourcePath;
     std::string cameraId = "cam0";
     double windowSeconds = 30.0;
     long long bitrateBps = 134400;
     bool runScenario = false;
+    // S4.3 — expurgo.
+    RetentionOptions retentionOptions;
 
-    for (int i = 1; i < argc; ++i) {
-        const std::string argument = argv[i];
-        const auto read_value = [&](const char* flag) -> bool {
-            if (argument == flag && i + 1 < argc) {
-                ++i;
-                return true;
+    try {
+        for (int i = 1; i < argc; ++i) {
+            const std::string argument = argv[i];
+            const auto read_value = [&](const char* flag) -> bool {
+                if (argument == flag && i + 1 < argc) {
+                    ++i;
+                    return true;
+                }
+                return false;
+            };
+            if (read_value("--port")) {
+                port = std::stoi(argv[i]);
+            } else if (read_value("--db")) {
+                dbPath = argv[i];
+            } else if (read_value("--media-dir")) {
+                mediaDir = argv[i];
+            } else if (read_value("--source")) {
+                sourcePath = argv[i];
+            } else if (read_value("--camera")) {
+                cameraId = argv[i];
+            } else if (read_value("--window-seconds")) {
+                windowSeconds = std::stod(argv[i]);
+            } else if (read_value("--bitrate")) {
+                bitrateBps = std::stoll(argv[i]);
+            } else if (argument == "--scenario") {
+                runScenario = true;
+            } else if (read_value("--retention-days")) {
+                retentionOptions.retentionDays = std::stod(argv[i]);
+            } else if (read_value("--quota-trigger")) {
+                retentionOptions.quotaTrigger = std::stod(argv[i]);
+            } else if (read_value("--quota-target")) {
+                retentionOptions.quotaTarget = std::stod(argv[i]);
+            } else if (read_value("--sweep-interval")) {
+                retentionOptions.sweepIntervalSeconds = std::stoll(argv[i]);
+            } else if (read_value("--disk-check-interval")) {
+                retentionOptions.diskCheckIntervalSeconds = std::stoll(argv[i]);
+            } else if (read_value("--purge-log")) {
+                retentionOptions.purgeLogPath = argv[i];
+            } else {
+                print_usage(argv[0]);
+                return 1;
             }
-            return false;
-        };
-        if (read_value("--port")) {
-            port = std::stoi(argv[i]);
-        } else if (read_value("--db")) {
-            dbPath = argv[i];
-        } else if (read_value("--media-dir")) {
-            mediaDir = argv[i];
-        } else if (read_value("--source")) {
-            sourcePath = argv[i];
-        } else if (read_value("--camera")) {
-            cameraId = argv[i];
-        } else if (read_value("--window-seconds")) {
-            windowSeconds = std::stod(argv[i]);
-        } else if (read_value("--bitrate")) {
-            bitrateBps = std::stoll(argv[i]);
-        } else if (argument == "--scenario") {
-            runScenario = true;
-        } else {
-            print_usage(argv[0]);
-            return 1;
         }
+    } catch (const std::logic_error&) {
+        // std::stoi/stod com texto nao numerico ou fora da faixa.
+        print_usage(argv[0]);
+        return 1;
+    }
+    if (retentionOptions.sweepIntervalSeconds <= 0 || retentionOptions.diskCheckIntervalSeconds <= 0) {
+        std::cerr << "--sweep-interval and --disk-check-interval must be positive\n";
+        return 1;
+    }
+    if (retentionOptions.purgeLogPath.empty()) {
+        // Ao lado do banco: no container, os dois ficam no volume /data.
+        retentionOptions.purgeLogPath =
+            (std::filesystem::path(dbPath).parent_path() / "s4_purge_log.jsonl").string();
     }
 
     if (!sourcePath.empty() && !std::filesystem::is_regular_file(sourcePath)) {
@@ -300,7 +389,19 @@ int main(int argc, char* argv[]) {
         repository, mediaBuffer, fileStorage, mediaBuffer, muxer
     );
 
+    // S4.3 — expurgo automatico (LGPD + cota do NVMe), em thread propria.
+    // repository e fileStorage sao entregues por copia: o extrator de clipes
+    // usa os mesmos dois.
+    std::unique_ptr<ods::s4::infrastructure::PurgeDaemon> purgeDaemon;
+    try {
+        purgeDaemon = make_purge_daemon(retentionOptions, repository, fileStorage, mediaDir);
+    } catch (const ods::s4::domain::ODSBaseException& error) {
+        std::cerr << "invalid retention settings: " << error.what() << std::endl;
+        return 1;
+    }
+
     mediaBuffer->startCapture(sessionId);
+    purgeDaemon->start();
 
     ods::s4::presentation::ClipDescriptorHttpServer server(repository, extractClip, mediaDir);
     if (!server.bind(port)) {
@@ -320,6 +421,9 @@ int main(int argc, char* argv[]) {
               << "/api/v1/clips/{id}\n";
     std::cout << "Simulate an event: POST http://127.0.0.1:" << port
               << "/api/v1/events\n";
+    std::cout << "Purge daemon: retention " << retentionOptions.retentionDays << " d, quota "
+              << retentionOptions.quotaTrigger * 100 << "% -> " << retentionOptions.quotaTarget * 100
+              << "%, log " << retentionOptions.purgeLogPath << '\n';
     if (!sourcePath.empty()) {
         std::cout << "Replaying '" << sourcePath << "' into the ring buffer\n";
     } else {
@@ -338,6 +442,7 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    purgeDaemon->stop();
     mediaBuffer->stopCapture();
     server.stop();
     return 0;

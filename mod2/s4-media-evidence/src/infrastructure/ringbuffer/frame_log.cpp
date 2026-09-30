@@ -58,6 +58,7 @@ RecordedFrameSource::RecordedFrameSource(
         throw domain::FrameSourceError("recorded scenario not found at " + basePath);
     }
     m_blob.assign(std::istreambuf_iterator<char>(blob), std::istreambuf_iterator<char>());
+    m_entries = loadIndex();
 }
 
 RecordedFrameSource::~RecordedFrameSource() {
@@ -88,10 +89,9 @@ void RecordedFrameSource::waitUntilFinished() {
 }
 
 void RecordedFrameSource::replay(domain::FrameCallback onFrame) {
-    const std::vector<Entry> entries = loadIndex();
     domain::Nanoseconds previousTs = 0;
     bool hasPrevious = false;
-    for (const Entry& entry : entries) {
+    for (const Entry& entry : m_entries) {
         if (m_stopRequested.load()) {
             return;
         }
@@ -127,8 +127,14 @@ std::vector<RecordedFrameSource::Entry> RecordedFrameSource::loadIndex() const {
         std::istringstream fields(line);
         Entry entry;
         int keyframeFlag = 0;
-        fields >> entry.captureTsNs >> entry.offset >> entry.length >> keyframeFlag >>
-            entry.sessionId;
+        fields >> entry.captureTsNs >> entry.offset >> entry.length >> keyframeFlag;
+        const bool hasNumericFields = !fields.fail();
+        fields >> entry.sessionId;  // pode faltar: sessao vazia e gravada como nada
+        const bool isInsideBlob =
+            entry.offset <= m_blob.size() && entry.length <= m_blob.size() - entry.offset;
+        if (!hasNumericFields || entry.length == 0 || !isInsideBlob) {
+            throw domain::FrameSourceError("corrupt scenario index at " + m_basePath + ": " + line);
+        }
         entry.isKeyframe = keyframeFlag != 0;
         entries.push_back(entry);
     }

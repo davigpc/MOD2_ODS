@@ -4,6 +4,7 @@
 #include "tests/ods_check.hpp"
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -259,6 +260,32 @@ void test_deve_devolver_trecho_truncado_quando_timeout_expirar_antes_do_depois()
     facade->stopCapture();
 }
 
+// Quem espera pelo pos-evento precisa ser liberado assim que a captura para,
+// e nao so quando o timeout (aqui 10 s) expirar.
+void test_deve_liberar_extracao_pendente_quando_captura_for_parada() {
+    for (int round = 0; round < 20; ++round) {
+        auto source = std::make_unique<ManualFrameSource>();
+        auto* raw = source.get();
+        auto facade = make_facade(config(30.0), std::move(source));
+        facade->startCapture("ignored");
+        raw->emit(0);
+
+        bool stoppedWhileWaiting = false;
+        const auto begin = std::chrono::steady_clock::now();
+        std::thread waiter([&] {
+            stoppedWhileWaiting = throws<domain::BufferNotRunningError>(
+                [&] { (void)facade->extractAround(0, 0.0, 60.0, 10.0); });
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(round % 3));
+        facade->stopCapture();
+        waiter.join();
+        const auto elapsed = std::chrono::steady_clock::now() - begin;
+
+        ODS_CHECK(stoppedWhileWaiting);
+        ODS_CHECK(elapsed < std::chrono::seconds(2));
+    }
+}
+
 void test_deve_contar_quadro_rejeitado_quando_timestamp_retroceder() {
     auto source = std::make_unique<ManualFrameSource>();
     auto* raw = source.get();
@@ -353,6 +380,37 @@ void test_deve_reproduzir_o_mesmo_resultado_quando_cenario_gravado_for_reexecuta
     ODS_CHECK(results[0] == results[1]);
     ODS_CHECK(!results[0].empty());
     std::remove((scenario + ".idx").c_str());
+    std::remove((scenario + ".bin").c_str());
+}
+
+// Indice apontando para fora do blob: o erro precisa aparecer na construcao,
+// e nao como leitura fora da memoria dentro da thread de replay.
+void test_deve_lancar_excecao_quando_indice_do_cenario_gravado_estiver_corrompido() {
+    const std::string scenario = unique_name("cenario_corrompido_");
+    {
+        std::ofstream blob(scenario + ".bin", std::ios::binary);
+        blob << "abcd";
+        std::ofstream index(scenario + ".idx");
+        index << "0 2 100 1 sessao\n";
+    }
+
+    ODS_CHECK(throws<domain::FrameSourceError>(
+        [&] { infrastructure::RecordedFrameSource source(scenario); }));
+
+    std::remove((scenario + ".idx").c_str());
+    std::remove((scenario + ".bin").c_str());
+}
+
+void test_deve_lancar_excecao_quando_indice_do_cenario_gravado_nao_existir() {
+    const std::string scenario = unique_name("cenario_sem_indice_");
+    {
+        std::ofstream blob(scenario + ".bin", std::ios::binary);
+        blob << "abcd";
+    }
+
+    ODS_CHECK(throws<domain::FrameSourceError>(
+        [&] { infrastructure::RecordedFrameSource source(scenario); }));
+
     std::remove((scenario + ".bin").c_str());
 }
 
@@ -477,12 +535,15 @@ int main() {
     test_deve_devolver_o_antes_do_evento_quando_o_depois_ja_estiver_no_buffer();
     test_deve_esperar_o_depois_do_evento_quando_ainda_estiver_sendo_capturado();
     test_deve_devolver_trecho_truncado_quando_timeout_expirar_antes_do_depois();
+    test_deve_liberar_extracao_pendente_quando_captura_for_parada();
     test_deve_contar_quadro_rejeitado_quando_timestamp_retroceder();
     test_deve_reiniciar_quando_sessao_de_replay_mudar();
 
     test_deve_entregar_o_antes_e_o_depois_do_evento_quando_stream_sintetico_encher_o_buffer();
     test_deve_manter_apenas_a_janela_configurada_quando_stream_for_mais_longo_que_o_buffer();
     test_deve_reproduzir_o_mesmo_resultado_quando_cenario_gravado_for_reexecutado();
+    test_deve_lancar_excecao_quando_indice_do_cenario_gravado_estiver_corrompido();
+    test_deve_lancar_excecao_quando_indice_do_cenario_gravado_nao_existir();
 
     test_deve_extrair_clipe_pelo_use_case_quando_buffer_real_substituir_o_mock();
     test_deve_devolver_lista_vazia_quando_janela_pedida_nao_existir_no_buffer();

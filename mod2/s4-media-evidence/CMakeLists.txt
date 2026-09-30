@@ -82,6 +82,14 @@ endif()
 option(ODS_S4_WITH_GSTREAMER "Compila o adaptador de captura GStreamer (S4.1)" ON)
 option(ODS_S4_REQUIRE_GSTREAMER "Falha a configuracao se o GStreamer nao for encontrado" ON)
 
+# O cenario de MP4 real depende de um arquivo em video_test/, que e material
+# binario de 17 MB versionado no repositorio. Num clone onde ele nao esteja, o
+# ctest reporta "Skipped" -- nunca "Passed". Quem quiser que a ausencia do video
+# reprove o build (a imagem Docker, que tem o video, e o caso que importa) pede
+# com -DODS_S4_REQUIRE_SAMPLE_VIDEO=ON.
+option(ODS_S4_REQUIRE_SAMPLE_VIDEO
+    "Reprova o cenario de replay quando video_test/ nao tem MP4" OFF)
+
 set(ODS_S4_GSTREAMER_ENABLED OFF)
 if(ODS_S4_WITH_GSTREAMER)
     # PkgConfig::GST carrega includes, diretorios de biblioteca e flags de link.
@@ -160,4 +168,21 @@ s4_add_test(test_s4_http_post_event tests/integration/test_http_post_event.cpp)
 s4_add_test(test_s4_ring_buffer tests/unit/test_ring_buffer.cpp)
 s4_add_test(test_s4_ring_buffer_runtime tests/integration/test_ring_buffer_runtime.cpp)
 s4_add_test(test_s4_iso_bmff_timestamps tests/unit/test_iso_bmff_timestamps.cpp)
+
+# Replay de MP4 real: sem video em video_test/ o teste sai com 77 e o CTest o
+# reporta como "Skipped", nunca como aprovado. Com ODS_S4_REQUIRE_SAMPLE_VIDEO
+# a ausencia do video vira falha dura -- e o que a imagem Docker usa, porque
+# ela copia o video para dentro do build.
 s4_add_test(test_s4_replay_e2e tests/integration/test_replay_e2e.cpp)
+set_tests_properties(test_s4_replay_e2e PROPERTIES SKIP_RETURN_CODE 77)
+if(ODS_S4_REQUIRE_SAMPLE_VIDEO)
+    target_compile_definitions(test_s4_replay_e2e PRIVATE ODS_S4_REQUIRE_SAMPLE_VIDEO)
+endif()
+
+# Captura real via GStreamer; sem a biblioteca ou sem x264enc/avdec_h264 o
+# teste sai com 77 e o CTest o reporta como "Skipped", nao como aprovado.
+s4_add_test(test_s4_gstreamer_capture tests/integration/test_gstreamer_capture.cpp)
+set_tests_properties(test_s4_gstreamer_capture PROPERTIES SKIP_RETURN_CODE 77)
+
+s4_add_test(test_s4_retention tests/unit/test_retention.cpp)
+s4_add_test(test_s4_retention_runtime tests/integration/test_retention_runtime.cpp)

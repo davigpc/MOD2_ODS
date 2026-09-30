@@ -50,8 +50,14 @@ void RingBufferRAMFacade::startCapture(const std::string& /*pipelineDesc*/) {
 }
 
 void RingBufferRAMFacade::stopCapture() {
-    if (!m_isCapturing.exchange(false)) {
-        return;
+    {
+        // O flag muda SOB o mutex: uma extracao que acabou de avaliar o
+        // predicado ainda nao dormiu e, sem isso, perderia o notify abaixo e
+        // ficaria pendurada ate o timeout inteiro.
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_isCapturing.exchange(false)) {
+            return;
+        }
     }
     // Acorda quem espera pelo pos-evento ANTES de derrubar a fonte, para que
     // nenhuma extracao fique pendurada ate o timeout.

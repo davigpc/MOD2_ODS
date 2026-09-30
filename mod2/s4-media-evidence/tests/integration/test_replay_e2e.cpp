@@ -470,11 +470,20 @@ std::optional<std::filesystem::path> find_sample_mp4() {
     return std::nullopt;
 }
 
-void test_deve_registrar_clipe_decodificavel_quando_video_real_for_reproduzido() {
+// Codigo de saida do cenario de video real: 0 rodou, 77 nao ha material.
+//
+// Sem o .mp4 em video_test/ o cenario nao pode rodar, e o que ele prova (o
+// fluxo completo sobre video real) e exatamente o que fica sem prova. Antes
+// isso era um "return" silencioso e o ctest reportava aprovado — o mesmo
+// buraco que o aviso de "compilado sem GStreamer" agora cobre: um teste que
+// nao exercita o que diz exercitar precisa aparecer como pulado, nunca como
+// aprovado. Da para quem compile com -DODS_S4_REQUIRE_SAMPLE_VIDEO(=ON) exigir
+// o material: e o caso do build Docker, que tem o video.
+int test_deve_registrar_clipe_decodificavel_quando_video_real_for_reproduzido() {
     const auto mp4 = find_sample_mp4();
     if (!mp4.has_value()) {
-        std::cout << "  (aviso) nenhum .mp4 em video_test/ — caso MP4 pulado\n";
-        return;
+        std::cout << "  video_test/ sem MP4 — cenario de video real pulado\n";
+        return 77;
     }
     std::cout << "  cenario MP4: " << mp4->string() << "\n";
 
@@ -522,7 +531,7 @@ void test_deve_registrar_clipe_decodificavel_quando_video_real_for_reproduzido()
     );
     ODS_CHECK(posted.status == 201);
     if (posted.status != 201) {
-        return;
+        return 1;
     }
 
     const auto clip = fixture.get("/api/v1/clips/" + posted.clipId);
@@ -536,6 +545,7 @@ void test_deve_registrar_clipe_decodificavel_quando_video_real_for_reproduzido()
     ODS_CHECK(bytes > 10000);
     ODS_CHECK(file_contains(clip.fileUri, "ftyp"));
     std::cout << "  clipe MP4: " << bytes << " bytes, contem ftyp\n";
+    return 0;
 }
 
 #endif // ODS_S4_WITH_GSTREAMER
@@ -549,9 +559,14 @@ int main() {
     test_deve_responder_400_quando_janela_invertida_for_pedida();
     test_deve_responder_500_quando_janela_estiver_fora_do_buffer();
 
+    // 0 = o cenario de video real rodou; 77 = nao rodou (sem GStreamer ou sem
+    // MP4 em video_test/). As duas coisas sao ausencias de material, e nenhuma
+    // delas pode virar "aprovado".
+    int cenarioVideoReal = 0;
 #ifdef ODS_S4_WITH_GSTREAMER
     std::cout << "test_s4_replay_e2e: cenario MP4\n";
-    test_deve_registrar_clipe_decodificavel_quando_video_real_for_reproduzido();
+    cenarioVideoReal =
+        test_deve_registrar_clipe_decodificavel_quando_video_real_for_reproduzido();
 #else
     // Ausencia de GStreamer e uma escolha explicita agora (o CMake falha o
     // configure por padrao), mas mesmo assim este teste nao pode sumir em
@@ -561,7 +576,21 @@ int main() {
     std::cout << "\n*** AVISO: compilado SEM GStreamer; o cenario de MP4 real "
                  "(replay, mux, decodificabilidade, hash) NAO foi executado. "
                  "Estes testes passarão sem exercitar essa parte. ***\n\n";
+    cenarioVideoReal = 77;
 #endif
+
+    if (cenarioVideoReal != 0) {
+#ifdef ODS_S4_REQUIRE_SAMPLE_VIDEO
+        std::cerr << "test_s4_replay_e2e: ODS_S4_REQUIRE_SAMPLE_VIDEO esta ON e o "
+                     "cenario de MP4 real nao foi executado — reprovando em vez "
+                     "de declarar o material opcional.\n";
+        return 1;
+#else
+        std::cout << "test_s4_replay_e2e: cenario de video real NAO executado "
+                     "(77 = skipped)\n";
+        return 77;
+#endif
+    }
 
     std::cout << "test_s4_replay_e2e: all tests passed\n";
     return 0;

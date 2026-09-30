@@ -20,6 +20,14 @@ public:
         return m_files.find(path) != m_files.end();
     }
 
+    [[nodiscard]] std::uintmax_t sizeOf(const std::string& path) const override {
+        const auto it = m_files.find(path);
+        if (it == m_files.end()) {
+            throw domain::MediaFileNotFoundError("file not stored in fake: " + path);
+        }
+        return it->second.size();
+    }
+
     void remove(const std::string& path) override {
         m_files.erase(path);
     }

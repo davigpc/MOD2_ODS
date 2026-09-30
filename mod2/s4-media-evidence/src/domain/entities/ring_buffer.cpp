@@ -121,10 +121,14 @@ BufferSegment RingBuffer::segmentFor(const CaptureWindow& window) const {
     const std::size_t startIndex = decodableStartIndex(m_frames, window);
     const std::size_t endIndex = lastIndexWithin(m_frames, window);
 
+    // O inicio e truncado quando o trecho ENTREGUE comeca depois do pedido — e
+    // nao so quando o buffer inteiro comeca depois: se o keyframe anterior ja
+    // foi expulso, o trecho pula para o primeiro keyframe dentro da janela e
+    // perde parte do "antes" mesmo havendo quadros P mais antigos no buffer.
     BufferSegment segment{
         window,
         {},
-        m_frames.front().captureTsNs > window.startNs(),
+        m_frames[startIndex].captureTsNs > window.startNs(),
         m_frames.back().captureTsNs < window.endNs()
     };
     segment.frames.assign(

@@ -27,6 +27,18 @@ bool FileStorage::exists(const std::string& path) const {
     return !ec && result;
 }
 
+std::uintmax_t FileStorage::sizeOf(const std::string& path) const {
+    std::error_code ec;
+    const std::uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec == std::errc::no_such_file_or_directory) {
+        throw domain::MediaFileNotFoundError("media file not found: " + path);
+    }
+    if (ec) {
+        throw domain::FileOperationError("cannot read size of file: " + path);
+    }
+    return size;
+}
+
 void FileStorage::remove(const std::string& path) {
     std::error_code ec;
     std::filesystem::remove(path, ec);
