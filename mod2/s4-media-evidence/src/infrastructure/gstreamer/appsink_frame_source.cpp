@@ -1,5 +1,7 @@
 #include "s4/infrastructure/gstreamer/appsink_frame_source.hpp"
 
+#include <cstdio>
+#include <optional>
 #include <utility>
 
 #include "s4/domain/errors/domain_error.hpp"
@@ -75,13 +77,26 @@ struct GStreamerAppsinkFrameSource::Impl {
 
 namespace {
 
-// capture_ts = base_time do pipeline + PTS do buffer (relogio monotonico).
+// capture_ts = base_time do pipeline + timestamp do buffer (relogio monotonico).
+//
+// Usa o DTS quando ele existe: o buffer guarda os quadros em ORDEM DE
+// DECODIFICACAO, que e a ordem em que o appsink os entrega e a unica em que a
+// concatenacao forma um H.264 valido. Com B-frames (replay de .mp4 comum) o PTS
+// sai fora dessa ordem (I P B B ...) e o RingBuffer rejeitaria cada B-frame
+// como relogio retrocedendo. Sem B-frames — o caso do NVENC de P4 — DTS e PTS
+// coincidem, entao o valor continua sendo o instante de captura.
+//
 // Ponto de acoplamento com B2: quando TRA-1/TRA-2 fecharem a base de tempo
 // oficial (por exemplo o timestamp que P4 grava via GstReferenceTimestampMeta),
 // basta trocar esta funcao.
-domain::Nanoseconds capture_timestamp(GstElement* pipeline, GstBuffer* buffer) {
+std::optional<domain::Nanoseconds> capture_timestamp(GstElement* pipeline, GstBuffer* buffer) {
+    const GstClockTime bufferTime =
+        GST_BUFFER_DTS_IS_VALID(buffer) ? GST_BUFFER_DTS(buffer) : GST_BUFFER_PTS(buffer);
+    if (!GST_CLOCK_TIME_IS_VALID(bufferTime)) {
+        return std::nullopt;
+    }
     return static_cast<domain::Nanoseconds>(gst_element_get_base_time(pipeline)) +
-           static_cast<domain::Nanoseconds>(GST_BUFFER_PTS(buffer));
+           static_cast<domain::Nanoseconds>(bufferTime);
 }
 
 GstFlowReturn on_new_sample(GstAppSink* sink, gpointer userData) {
@@ -91,6 +106,13 @@ GstFlowReturn on_new_sample(GstAppSink* sink, gpointer userData) {
         return GST_FLOW_ERROR;
     }
     GstBuffer* buffer = gst_sample_get_buffer(sample);
+    const std::optional<domain::Nanoseconds> captureTsNs = capture_timestamp(impl->pipeline, buffer);
+    if (!captureTsNs.has_value()) {
+        // Sem DTS nem PTS nao ha como posicionar o quadro na linha do tempo.
+        std::fprintf(stderr, "[S4.1] frame without timestamp dropped\n");
+        gst_sample_unref(sample);
+        return GST_FLOW_OK;
+    }
     GstMapInfo info;
     if (!gst_buffer_map(buffer, &info, GST_MAP_READ)) {
         gst_sample_unref(sample);
@@ -98,7 +120,7 @@ GstFlowReturn on_new_sample(GstAppSink* sink, gpointer userData) {
     }
 
     domain::CapturedFrame frame;
-    frame.captureTsNs = capture_timestamp(impl->pipeline, buffer);
+    frame.captureTsNs = *captureTsNs;
     frame.data = static_cast<const std::uint8_t*>(info.data);
     frame.length = info.size;
     // Sem a flag DELTA_UNIT o buffer e um keyframe.
@@ -148,6 +170,7 @@ void GStreamerAppsinkFrameSource::start(domain::FrameCallback onFrame) {
 
     m_impl->sink = gst_bin_get_by_name(GST_BIN(m_impl->pipeline), "ods_sink");
     if (m_impl->sink == nullptr) {
+        stop();
         throw domain::FrameSourceError("pipeline must end in 'appsink name=ods_sink'");
     }
     g_signal_connect(m_impl->sink, "new-sample", G_CALLBACK(on_new_sample), m_impl);
@@ -171,9 +194,13 @@ void GStreamerAppsinkFrameSource::start(domain::FrameCallback onFrame) {
 void GStreamerAppsinkFrameSource::stop() {
     if (m_impl->pipeline != nullptr) {
         gst_element_set_state(m_impl->pipeline, GST_STATE_NULL);
+        if (m_impl->sink != nullptr) {
+            // gst_bin_get_by_name devolveu uma referencia propria.
+            gst_object_unref(m_impl->sink);
+            m_impl->sink = nullptr;
+        }
         gst_object_unref(m_impl->pipeline);
         m_impl->pipeline = nullptr;
-        m_impl->sink = nullptr;
     }
     if (m_impl->loop != nullptr) {
         g_main_loop_quit(m_impl->loop);

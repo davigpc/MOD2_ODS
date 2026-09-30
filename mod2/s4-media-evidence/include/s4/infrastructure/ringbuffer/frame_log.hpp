@@ -66,6 +66,9 @@ private:
     std::string m_sessionOverride;
     bool m_realtime;
     std::vector<std::uint8_t> m_blob;
+    // Carregado e validado no construtor: um erro aqui dentro da thread de
+    // replay escaparia dela e derrubaria o processo (std::terminate).
+    std::vector<Entry> m_entries;
     std::thread m_thread;
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stopRequested{false};

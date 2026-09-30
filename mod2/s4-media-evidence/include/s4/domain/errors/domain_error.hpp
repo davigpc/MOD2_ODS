@@ -63,6 +63,26 @@ public:
         : DomainError(message) {}
 };
 
+// --- S4.3 Retencao & Expurgo: politicas invalidas ---------------------------
+
+class InvalidRetentionPolicyError : public DomainError {
+public:
+    explicit InvalidRetentionPolicyError(const std::string& message = "Retention period must be positive")
+        : DomainError(message) {}
+};
+
+class InvalidQuotaPolicyError : public DomainError {
+public:
+    explicit InvalidQuotaPolicyError(const std::string& message = "Quota ratios must satisfy 0 < target <= trigger <= 1")
+        : DomainError(message) {}
+};
+
+class InvalidDiskUsageError : public DomainError {
+public:
+    explicit InvalidDiskUsageError(const std::string& message = "Disk usage must report a positive capacity")
+        : DomainError(message) {}
+};
+
 class ApplicationError : public ODSBaseException {
 public:
     explicit ApplicationError(const std::string& message)
@@ -114,6 +134,20 @@ public:
 class FileOperationError : public ApplicationError {
 public:
     explicit FileOperationError(const std::string& message = "File operation failed")
+        : ApplicationError(message) {}
+};
+
+// --- S4.3 Retencao & Expurgo: falhas de infraestrutura ----------------------
+
+class DiskUsageUnavailableError : public ApplicationError {
+public:
+    explicit DiskUsageUnavailableError(const std::string& message = "Cannot read NVMe disk usage")
+        : ApplicationError(message) {}
+};
+
+class PurgeLogError : public ApplicationError {
+public:
+    explicit PurgeLogError(const std::string& message = "Cannot append to the purge log")
         : ApplicationError(message) {}
 };
 

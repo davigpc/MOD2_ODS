@@ -105,3 +105,9 @@ s4_add_test(test_s4_http_server tests/integration/test_http_server.cpp)
 s4_add_test(test_s4_http_post_event tests/integration/test_http_post_event.cpp)
 s4_add_test(test_s4_ring_buffer tests/unit/test_ring_buffer.cpp)
 s4_add_test(test_s4_ring_buffer_runtime tests/integration/test_ring_buffer_runtime.cpp)
+# Captura real via GStreamer; sem a biblioteca ou sem x264enc/avdec_h264 o
+# teste sai com 77 e o CTest o reporta como "Skipped", nao como aprovado.
+s4_add_test(test_s4_gstreamer_capture tests/integration/test_gstreamer_capture.cpp)
+set_tests_properties(test_s4_gstreamer_capture PROPERTIES SKIP_RETURN_CODE 77)
+s4_add_test(test_s4_retention tests/unit/test_retention.cpp)
+s4_add_test(test_s4_retention_runtime tests/integration/test_retention_runtime.cpp)
