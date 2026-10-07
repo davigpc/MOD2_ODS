@@ -1,155 +1,74 @@
-# S4 — Evidência de Mídia (Media Evidence)
+# Guia de Desenvolvimento e Execução - Kit B6 (Módulo MOD-2)
 
-> Componente da **Camada 3 (Serviço)** do Squad **MOD-2** (Mídia, Métricas e Interfaces) no projeto **ODS 2026/2**.
+Este repositório contém a implementação dos submódulos de interface **B6.1 (OverlayPlayer)** e **B6.2 (ZoneEditor)**, responsáveis pela renderização gráfica acelerada e edição topológica vetorial do ecossistema ODS.
 
-O serviço **S4** é responsável por gerenciar o ciclo de vida das evidências audiovisuais na borda (**NVIDIA Jetson Orin Nano**), incluindo captura contínua em buffer de memória RAM, extração de clipes probatórios vinculados a eventos do Barramento B3, persistência em SSD NVMe com integridade criptográfica (SHA-256) e expurgo automático conforme LGPD e políticas de cota de disco.
+## 🛠️ Pré-requisitos e Configuração Inicial
 
----
+Para garantir que o ambiente local executa corretamente tanto o servidor de testes visuais (HTML) quanto a suíte de testes automatizados (TDD), é necessário preparar o ecossistema Node.js.
 
-## 🏗️ Arquitetura e Estrutura de Diretórios
+Na raiz do seu diretório (`~/MOD2_ODS/mod2`), execute os seguintes comandos:
 
-O projeto adota os princípios de **Clean Architecture**, **Domain-Driven Design (DDD)** e **Design Patterns (GoF)**, desenvolvido em **C++20** com sistema de build **CMake**.
+1. **Inicializar o pacote NPM** (caso não exista um `package.json`):
+   ```bash
+   npm init -y
+   ```
 
-```text
-mod2/s4-media-evidence/
-├── CMakeLists.txt              # Configuração de build C++20 e dependências
-├── README.md                   # Documentação do componente
-├── Dockerfile                  # Imagem OCI multi-arch (builder + runtime)
-├── docker-compose.yml          # Orquestração local (porta 8080 + volume)
-├── .dockerignore               # Exclusões do contexto de build
-├── third_party/httplib/        # cpp-httplib vendido (HTTP server)
-├── include/s4/                 # Headers públicos da biblioteca
-│   ├── domain/                 # 1. Coração do negócio (zero dependências externas)
-│   │   ├── entities/           # Entidades (MediaClip)
-│   │   ├── value_objects/      # Objetos de Valor (TimeWindow, ClipDescriptor)
-│   │   ├── repositories/       # Contratos (IMediaClipRepository, IFileStorage)
-│   │   ├── services/           # Porta de leitura do buffer (IMediaBufferReader)
-│   │   ├── strategies/         # Padrão GoF Strategy de retenção (IRetentionStrategy)
-│   │   └── errors/             # Hierarquia de exceções de domínio
-│   ├── application/            # 2. Orquestração de casos de uso e DTOs
-│   │   ├── use_cases/          # Casos de uso (ExtractClipUseCase, PurgeMediaUseCase futuro)
-│   │   └── dtos/               # Data Transfer Objects (ClipDescriptorDTO, ISO 8601)
-│   ├── infrastructure/         # 3. Adaptadores e integrações externas
-│   │   ├── database/           # Implementações de repositório (SQLite, In-Memory)
-│   │   ├── filesystem/         # Persistência em disco (FileStorage)
-│   │   ├── hashing/            # Integridade criptográfica SHA-256 (OpenSSL)
-│   │   ├── gstreamer/          # Fachada do buffer (IRAMBufferFacade + MockRAMBufferFacade)
-│   │   └── b3_bus/             # Consumidor de eventos do Barramento B3 (contrato)
-│   └── presentation/           # 4. Controladores e exposição de API
-│       └── http/               # Controller + servidor REST (ClipDescriptorHttpServer)
-├── src/                        # Implementações (.cpp)
-│   ├── application/use_cases/  # extract_clip.cpp
-│   ├── presentation/http/      # controller + servidor REST
-│   └── infrastructure/         # hashing, database, filesystem, gstreamer
-├── main.cpp → src/main.cpp     # Daemon demo executável
-└── tests/                      # Suíte de testes automatizados
-    ├── unit/                   # Testes puros (domínio, casamento de uso, hash)
-    └── integration/            # Testes com SQLite, filesystem real e HTTP
-```
+2. **Instalar as dependências de desenvolvimento**:
+   ```bash
+   npm install -D vite vitest jsdom
+   ```
+   * **vite:** Servidor de desenvolvimento rápido para processar o TypeScript e servir os ficheiros `index.html`.
+   * **vitest & jsdom:** Framework de testes unitários e simulador de navegador para garantir a validação de regras de domínio (Zero I/O) sem depender da interface gráfica real.
 
 ---
 
-## 🧩 Submódulos e Responsabilidades (Squad MOD-2)
+## 🖥️ Executar os Testes Visuais (HTML)
 
-Conforme definido em [`docs/responsability.md`](../../docs/responsability.md):
+Os ficheiros HTML permitem testar a interação física (cliques do rato, renderização a 60 FPS e sobreposição de vídeo) no navegador.
 
-| Submódulo | Funcionalidade | Padrão / Arquitetura | Responsável |
-| :--- | :--- | :--- | :--- |
-| **S4.1 — Ring Buffer Contínuo** | Gravação circular em RAM (`/dev/shm`) dos últimos $N$ segundos pré-evento. **Mockado**: `MockRAMBufferFacade` (frames sintéticos) até integração real. | Facade + POSIX Shared Memory / GStreamer | Henrique Azevedo |
-| **S4.2 — Binding Evento-Mídia** | Extração de trecho pré/pós evento da RAM, exportação em arquivo e hash SHA-256 real (OpenSSL). **Implementado** | Command Handler + SHA-256 | Davi Gomes |
-| **S4.3 — Retenção & Expurgo LGPD** | Expurgo automático após 7 dias (LGPD) ou emergencial a 85% do NVMe (`is_locked_for_audit`). **Diferido** (somente contrato `IRetentionStrategy`). | Daemon Worker + Strategy Pattern | Henrique Azevedo |
-| **S4.4 — API Descritores de Clipe** | Exposição de metadados e URIs locais sem trafegar vídeo binário. **Implementado**: REST `GET /api/v1/clips/{id}` | REST Controller + Clean Architecture | Davi Gomes |
+### B6.1 - OverlayPlayer (Visualizador e Sincronização por Intervalos)
+1. Certifique-se de que o ficheiro `index_player.html` está configurado para importar o `b6_overlay_player.ts`.
+2. Inicie o servidor Vite:
+   ```bash
+   npx vite
+   ```
+3. Abra o link fornecido na consola (normalmente `http://localhost:5173/index_player.html`).
+4. **O que testar:** O player reproduz o clipe utilizando controlos customizados encapsulados (Play/Pause, barra de progresso temporal, volume e ecrã inteiro). As caixas de deteção e rótulos acompanham de forma fluida os **intervalos temporais** (`startTime` e `endTime`) injetados via DTO através do método `loadMetadataTimeline()`.
 
----
-
-## 📐 Padrões GoF Implementados
-
-1. **Repository**: [`IMediaClipRepository`](include/s4/domain/repositories/media_clip_repository.hpp) isola completamente as regras de domínio do SQLite.
-2. **Strategy**: [`IRetentionStrategy`](include/s4/domain/strategies/retention_strategy.hpp) permite alternar dinamicamente os algoritmos de expurgo (prazo LGPD vs. cota de disco FIFO).
-3. **Facade**: [`IRAMBufferFacade`](include/s4/infrastructure/gstreamer/ram_buffer_facade.hpp) oculta a complexidade de ponteiros e pipes do GStreamer.
-4. **Observer / Consumer**: [`B3EventConsumer`](include/s4/infrastructure/b3_bus/b3_event_consumer.hpp) assina eventos do barramento B3 e dispara os casos de uso.
-
----
-
-## ⚙️ Pré-requisitos e Dependências
-
-- **Compilador C++**: GCC 11+, Clang 13+ ou compatível com **C++20**
-- **CMake**: Versão 3.20 ou superior
-- **Bibliotecas do Sistema**:
-  - `sqlite3` (persistência de metadados)
-  - `OpenSSL` (cálculo de hash SHA-256)
-  - `GStreamer 1.0` (captura e encode de vídeo)
+### B6.2 - ZoneEditor (Editor Interativo)
+1. Certifique-se de que o ficheiro `index.html` está configurado com as importações do `b6_zone_editor.ts`.
+2. Inicie o servidor Vite:
+   ```bash
+   npx vite
+   ```
+3. Abra a interface no navegador.
+4. **O que testar (UX/UI):**
+   * **Criar:** Clique esquerdo para desenhar pontos e clique direito (numa área vazia) para fechar o polígono.
+   * **Mover:** Clique esquerdo e arraste para mover um ponto ou a zona inteira.
+   * **Adicionar:** Passe o rato na linha da aresta (ficará branca), clique esquerdo e puxe para criar um novo vértice.
+   * **Apagar:** Clique direito sobre um ponto ou sobre o corpo da zona para excluí-los (com validação anti-cruzamento).
 
 ---
 
-## 🔨 Compilação e Testes
+## 🧪 Executar a Suíte de Testes Unitários (TDD)
 
-### Compilando o Projeto
+Os testes automatizados cobrem as regras críticas de domínio, o motor de validação topológica (`PolygonValidator`) e as exceções da arquitetura. 
+
+Para correr os testes de **ambos os módulos simultaneamente**, execute:
 
 ```bash
-mkdir -p build && cd build
-cmake ..
-cmake --build .
+npx vitest
 ```
 
-### Executando Testes
+### O que cada teste valida:
 
-Os testes de unidade seguem a convenção `deve_[resultado]_quando_[condicao]`. Testes de unidade usam zero I/O
-(exceto o cálculo de hash); a integração cobre SQLite em arquivo temporário, extração com filesystem real e servidor HTTP.
+* **`b6_overlay_player.test.ts` (B6.1):**
+  * Valida o lançamento de exceções rigorosas caso o contentor alvo não seja localizado no DOM.
+  * Verifica a correta montagem estrutural do player e a ordenação cronológica de segurança das timelines baseadas em **intervalos temporais** (`startTime` e `endTime`).
 
-```bash
-ctest --output-on-failure
-```
+* **`b6_zone_editor.test.ts` (B6.2):**
+  * **Testes de Domínio:** Valida matematicamente que polígonos cruzados (em forma de "gravata") são rejeitados pelo sistema antes da exportação.
+  * **Testes de Estado:** Utilizando fakes de DOM em memória (`jsdom`), garante que sequências complexas de cliques criam, movem e excluem dados de forma segura, respeitando sempre o formato de saída normalizado `[0.0, 1.0]`.
 
-### Executando o Serviço (daemon demo)
-
-```bash
-./s4_media_evidence --port 8080 --db /tmp/s4.db --media-dir /tmp/s4-media
-```
-
-O daemon inicia a captura sintética (mock), extrai um clipe de exemplo e expõe a API:
-
-```bash
-curl http://localhost:8080/api/v1/clips/<clip_id>
-sha256sum /tmp/s4-media/event-demo.mp4   # deve bater com "sha256_hash" do JSON
-```
-
-O plano de implementação e o backlog de integração real (S4.1/S4.3) estão em
-[`docs/PLANO_IMPLEMENTACAO_S4.md`](../../docs/PLANO_IMPLEMENTACAO_S4.md).
-
----
-
-## 🐳 Containerização (Docker)
-
-Imagem OCI **multi-arch** (`debian:bookworm-slim`, multi-stage): o estágio `builder` compila em C++20 e executa o
-`ctest` completo (falha de teste quebra o build), e o estágio `runtime` final contém apenas as bibliotecas em tempo de
-execução e o binário, rodando como usuário não-root `s4` com `VOLUME /data`.
-
-```bash
-# Build (testes rodam dentro do builder)
-docker build -t ods/s4-media-evidence:0.1.0 ./mod2/s4-media-evidence
-
-# Executar (dados persistidos em volume nomeado)
-docker run -d --rm --name s4 -p 8080:8080 -v s4_data:/data ods/s4-media-evidence:0.1.0
-curl http://127.0.0.1:8080/healthz                # {"status": "ok"}
-
-# Ou via docker compose (healthcheck + porta + volume)
-docker compose -f mod2/s4-media-evidence/docker-compose.yml up -d --build
-```
-
-Detalhes, verificação (smoke test) e instruções para a **Jetson Orin Nano (arm64)** — build nativo na própria Jetson
-ou alternativa com `buildx`/`binfmt` — estão em
-[`docs/PLANO_CONTAINERIZACAO_S4.md`](../../docs/PLANO_CONTAINERIZACAO_S4.md).
-
----
-
-## 📋 Checklist de Conformidade
-
-Antes de submeter código ou PR:
-- [x] **Clean Architecture**: Domínio não possui dependências de bibliotecas de terceiros ou frameworks.
-- [x] **Sem Vídeo no Barramento**: Apenas metadados e DTOs trafegam nas APIs/mensageria.
-- [x] **Nomenclatura Limpa**: Código autoexplicativo e funções focadas (SRP).
-- [x] **Tratamento de Exceções**: Uso de exceções tipadas de `DomainError` e `ApplicationError`.
-- [x] **Conformidade LGPD**: Entidade `MediaClip` possui controle de tempo de retenção e flag de trava de auditoria (`is_locked_for_audit`).
-- [x] **Testes de Unidade**: Suíte `deve_..._quando_...` passando (unit + integration).
-- [ ] **S4.3 — Expurgo LGPD**: pendente (contrato `IRetentionStrategy`; implementação real no backlog da Henrique).
+### Dica de Desenvolvimento
+Para manter os testes a correr continuamente em segundo plano (Watch Mode) enquanto escreve código, basta deixar o comando `npx vitest` em execução no terminal. O sistema irá relatar falhas e sucessos em tempo real a cada ficheiro guardado.
