@@ -319,7 +319,7 @@ mod2/
 │├── unit/# Testes puros de domínio (sem I/O)
 │└── integration/# Testes com SQLite e sistema de arquivos
 │
-├── s5-time-series/
+├── s5/
 │├── src/││├── domain/│││├── entities/# HeatmapGrid.py, OccupancyMetric.py
 │││├── value_objects/# WorldCoordinate.py, SpatialCell.py
 │││├── repositories/# ITimeSeriesRepository.py
