@@ -2,6 +2,8 @@
 
 #include <string>
 #include <chrono>
+#include <vector>
+#include "s4/domain/value_objects/clip_descriptor.hpp"
 #include "s4/domain/value_objects/time_window.hpp"
 
 namespace ods::s4::domain {
@@ -18,7 +20,8 @@ public:
         TimeWindow timeWindow,
         bool isRetained = true,
         bool isLockedForAudit = false,
-        TimePoint createdAt = std::chrono::system_clock::now()
+        TimePoint createdAt = std::chrono::system_clock::now(),
+        std::vector<PointOfInterest> pointsOfInterest = {}
     ) : m_clipId(std::move(clipId)),
         m_eventId(std::move(eventId)),
         m_filePath(std::move(filePath)),
@@ -26,7 +29,8 @@ public:
         m_timeWindow(std::move(timeWindow)),
         m_isRetained(isRetained),
         m_isLockedForAudit(isLockedForAudit),
-        m_createdAt(createdAt) {}
+        m_createdAt(createdAt),
+        m_pointsOfInterest(std::move(pointsOfInterest)) {}
 
     [[nodiscard]] const std::string& clipId() const noexcept { return m_clipId; }
     [[nodiscard]] const std::string& eventId() const noexcept { return m_eventId; }
@@ -36,6 +40,9 @@ public:
     [[nodiscard]] bool isRetained() const noexcept { return m_isRetained; }
     [[nodiscard]] bool isLockedForAudit() const noexcept { return m_isLockedForAudit; }
     [[nodiscard]] TimePoint createdAt() const noexcept { return m_createdAt; }
+    [[nodiscard]] const std::vector<PointOfInterest>& pointsOfInterest() const noexcept {
+        return m_pointsOfInterest;
+    }
 
     void markAsPurged() noexcept {
         m_isRetained = false;
@@ -58,6 +65,7 @@ private:
     bool m_isRetained{true};
     bool m_isLockedForAudit{false};
     TimePoint m_createdAt;
+    std::vector<PointOfInterest> m_pointsOfInterest;
 };
 
 } // namespace ods::s4::domain
